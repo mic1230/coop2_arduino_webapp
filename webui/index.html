@@ -1,13 +1,138 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>webui</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coop Door</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+    <link rel="stylesheet" href="./styles.css?v=20251108.1" />
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.js"></script>
+    <main class="page container">
+      <header class="page-header">
+        <div>
+          <h1>Coop Door</h1>
+          <p class="subtle" data-last-updated>Waiting for controller&hellip;</p>
+        </div>
+        <button type="button" class="ghost" id="refresh-btn">Refresh</button>
+      </header>
+
+      <section class="loading-panel" data-loading>
+        <div class="spinner" aria-hidden="true"></div>
+        <p>Connecting to the coop controller...</p>
+      </section>
+
+      <div class="banner info status-hint" data-status-hint hidden role="status">
+        Syncing with controller...
+      </div>
+
+      <div class="banner error" data-error hidden role="status"></div>
+
+      <section class="cards" data-cards hidden>
+        <article class="card door-card">
+          <div class="card-header">
+            <h2>Door status</h2>
+            <span class="status-chip" data-door-chip>unknown</span>
+          </div>
+          <dl class="key-values single">
+            <div>
+              <dt>Current time</dt>
+              <dd data-current-time>--</dd>
+            </div>
+          </dl>
+          <div class="countdown" data-countdown hidden>
+            <div class="countdown-header">
+              <span class="label">Countdown</span>
+              <strong data-countdown-value>--</strong>
+            </div>
+            <div class="countdown-bar" data-countdown-bar hidden>
+              <div class="fill" data-countdown-fill style="width: 0%"></div>
+            </div>
+            <small class="subtle" data-countdown-meta>Targeting --</small>
+          </div>
+          <p class="chip warning" data-test-mode hidden>
+            Test mode is enabled &mdash; relays are not energized.
+          </p>
+          <div class="actions">
+            <button type="button" class="action-button" data-open-btn>Open door</button>
+            <button type="button" class="action-button" data-close-btn>Close door</button>
+          </div>
+          <div class="door-history">
+            <div class="door-history-header">
+              <div>
+                <h3>Door history</h3>
+                <p class="subtle">Last door changes and hourly snapshots</p>
+              </div>
+              <button type="button" class="ghost small" data-download-history>
+                Download CSV
+              </button>
+            </div>
+            <div class="door-history-table-wrapper">
+              <table class="door-history-table" aria-label="Door history">
+                <thead>
+                  <tr>
+                    <th scope="col">Timestamp</th>
+                    <th scope="col">Door</th>
+                    <th scope="col">Battery temp</th>
+                    <th scope="col">Greenhouse temp</th>
+                    <th scope="col">Battery voltage</th>
+                    <th scope="col">Event</th>
+                  </tr>
+                </thead>
+                <tbody data-door-history-body>
+                  <tr>
+                    <td colspan="6" class="empty-history">
+                      History will appear once data is available.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
+        <article class="card sensor-card">
+          <div class="card-header">
+            <h2>Sensors</h2>
+          </div>
+          <div class="sensor-grid">
+            <div>
+              <span class="label">Battery temp</span>
+              <strong data-battery-temp>--</strong>
+            </div>
+            <div>
+              <span class="label">Greenhouse temp</span>
+              <strong data-greenhouse-temp>--</strong>
+            </div>
+            <div>
+              <span class="label">Battery voltage</span>
+              <strong data-battery-voltage>--</strong>
+            </div>
+          </div>
+        </article>
+
+        <article class="card wifi-card">
+          <div class="card-header">
+            <h2>Wi-Fi</h2>
+          </div>
+          <dl class="key-values" data-wifi-values>
+            <div>
+              <dt>SSID</dt>
+              <dd data-wifi-ssid>--</dd>
+            </div>
+            <div>
+              <dt>IP address</dt>
+              <dd data-wifi-ip>--</dd>
+            </div>
+            <div>
+              <dt>Signal</dt>
+              <dd data-wifi-signal>--</dd>
+            </div>
+          </dl>
+          <p class="subtle" data-wifi-empty hidden>Not connected.</p>
+        </article>
+      </section>
+    </main>
+    <script src="./app.js?v=20251108.1" type="module"></script>
   </body>
 </html>

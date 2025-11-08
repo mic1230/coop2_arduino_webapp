@@ -7,6 +7,11 @@
 #include <esp32-hal-adc.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <FS.h>
+#include <LittleFS.h>
+#include <time.h>
+#include <vector>
+#include <algorithm>
 
 #include "web_assets.h"
 
@@ -51,6 +56,7 @@ constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
 constexpr bool TEST_MODE = true;  // When true, relays are not driven; logs only.
 constexpr bool VERBOSE_LOGS = false;
+constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
 
 //==============================================================================
 // Sensor configuration (ported from MicroPython get_sensor_readings)
@@ -60,6 +66,19 @@ constexpr uint8_t BATTERY_ADC_PIN = 1;  // Matches MicroPython's ADC Pin 1
 constexpr float ADC_REFERENCE_VOLTS = 3.3f;
 constexpr float VOLTAGE_DIVIDER_RATIO = 0.8333f;  // 10k / (10k + 2k)
 constexpr uint16_t SENSOR_CONVERSION_DELAY_MS = 750;
+
+//==============================================================================
+// Door history tracking
+//==============================================================================
+constexpr size_t DOOR_HISTORY_CSV_BUFFER_LIMIT = 128;
+constexpr size_t DOOR_HISTORY_DISPLAY_LIMIT = 30;
+constexpr const char *DOOR_HISTORY_CSV_PATH = "/door_history.csv";
+constexpr size_t DOOR_HISTORY_MAX_BYTES = 1024 * 1024;
+constexpr uint32_t DOOR_HISTORY_HOURLY_SECONDS = 60 * 60;
+constexpr const char *DOOR_HISTORY_CSV_HEADER =
+    "timestamp,display_time,door_state,battery_temp_c,greenhouse_temp_c,battery_voltage,event\n";
+
+struct DoorHistoryEntry;
 
 OneWire onewireBus(DS18B20_PIN);
 DallasTemperature temperatureBus(&onewireBus);
@@ -81,8 +100,24 @@ void initBatteryAdc();
 bool readTemperature(const DeviceAddress address, const char *label, float &valueOut);
 SensorReadings getSensorReadings();
 void logSensorReadings();
+bool ensureFileSystem();
+void loadDoorHistoryFromDisk();
+void trimDoorHistoryCsv();
+void appendDoorHistoryCsv(const DoorHistoryEntry &entry);
+bool recordDoorHistory(const char *eventLabel);
+void maybeRecordHourlyHistory();
+void syncClock();
+time_t currentTimestamp();
+String formatHistoryTimestamp(time_t ts);
+String formatDoorHistoryCsvLine(const DoorHistoryEntry &entry);
+bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut);
+void pushDoorHistoryEntry(const DoorHistoryEntry &entry);
 bool serveEmbeddedAsset(WebServer &server, const String &requestPath);
 void handleWebIndex();
+void handleDoorHistoryEndpoint();
+void handleDoorHistoryCsv();
+bool waitForSerial(uint32_t timeoutMs = SERIAL_WAIT_TIMEOUT_MS);
+void updateSerialAttachmentAnnounce();
 
 WebServer apiServer(80);
 bool apiServerEnabled = false;
@@ -104,6 +139,25 @@ struct DoorMotionController {
 };
 
 DoorMotionController doorMotion;
+
+struct DoorHistoryEntry {
+  time_t timestamp = 0;
+  DoorState doorState = DoorState::Closed;
+  bool hasBatteryTemp = false;
+  float batteryTempC = 0.0f;
+  bool hasGreenhouseTemp = false;
+  float greenhouseTempC = 0.0f;
+  bool hasBatteryVoltage = false;
+  float batteryVoltage = 0.0f;
+  String event;
+};
+
+std::vector<DoorHistoryEntry> doorHistoryEntries;
+bool fileSystemReady = false;
+time_t lastHourlyBucket = 0;
+bool clockSynchronized = false;
+static bool serialConsoleAttached = false;
+static bool serialAnnouncementSent = false;
 
 const char *doorStateToString(DoorState state) {
   return state == DoorState::Opened ? "opened" : "closed";
@@ -262,6 +316,7 @@ void completeDoorMotion() {
   doorMotion.motion = DoorMotion::Idle;
   doorMotion.motionStartMs = 0;
   logDoorStatusIfChanged(F("motion_complete"), doorMotion.targetState);
+  recordDoorHistory("door_change");
 }
 
 void updateDoorMotion() {
@@ -402,6 +457,279 @@ void logSensorReadings() {
   }
   if (!readings.hasBatteryVoltage) {
     Serial.println("Battery voltage reading unavailable.");
+  }
+}
+
+bool ensureFileSystem() {
+  if (fileSystemReady) {
+    return true;
+  }
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS mount failed.");
+    return false;
+  }
+  fileSystemReady = true;
+  return true;
+}
+
+void pushDoorHistoryEntry(const DoorHistoryEntry &entry) {
+  doorHistoryEntries.push_back(entry);
+  if (doorHistoryEntries.size() > DOOR_HISTORY_CSV_BUFFER_LIMIT) {
+    const size_t excess = doorHistoryEntries.size() - DOOR_HISTORY_CSV_BUFFER_LIMIT;
+    doorHistoryEntries.erase(doorHistoryEntries.begin(), doorHistoryEntries.begin() + excess);
+  }
+}
+
+String formatHistoryTimestamp(time_t ts) {
+  if (ts <= 0) {
+    return String(F("1970-01-01 00:00:00"));
+  }
+  struct tm timeinfo;
+  gmtime_r(&ts, &timeinfo);
+  char buffer[20];
+  std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+                timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour,
+                timeinfo.tm_min, timeinfo.tm_sec);
+  return String(buffer);
+}
+
+String formatDoorHistoryCsvLine(const DoorHistoryEntry &entry) {
+  String line;
+  line.reserve(160);
+  line += String(static_cast<unsigned long>(entry.timestamp));
+  line += F(",");
+  line += formatHistoryTimestamp(entry.timestamp);
+  line += F(",");
+  line += doorStateToString(entry.doorState);
+  line += F(",");
+  if (entry.hasBatteryTemp) {
+    line += String(entry.batteryTempC, 2);
+  }
+  line += F(",");
+  if (entry.hasGreenhouseTemp) {
+    line += String(entry.greenhouseTempC, 2);
+  }
+  line += F(",");
+  if (entry.hasBatteryVoltage) {
+    line += String(entry.batteryVoltage, 2);
+  }
+  line += F(",");
+  if (entry.event.length() > 0) {
+    line += entry.event;
+  } else {
+    line += F("event");
+  }
+  line += '\n';
+  return line;
+}
+
+bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut) {
+  String trimmed = line;
+  trimmed.trim();
+  if (!trimmed.length()) {
+    return false;
+  }
+  String parts[7];
+  int partIndex = 0;
+  int start = 0;
+  while (partIndex < 6) {
+    const int comma = trimmed.indexOf(',', start);
+    if (comma < 0) {
+      return false;
+    }
+    parts[partIndex++] = trimmed.substring(start, comma);
+    start = comma + 1;
+  }
+  parts[partIndex] = trimmed.substring(start);
+  DoorHistoryEntry entry;
+  entry.timestamp = static_cast<time_t>(parts[0].toInt());
+  entry.doorState = doorStateFromString(parts[2]);
+  if (parts[3].length() > 0) {
+    entry.hasBatteryTemp = true;
+    entry.batteryTempC = parts[3].toFloat();
+  }
+  if (parts[4].length() > 0) {
+    entry.hasGreenhouseTemp = true;
+    entry.greenhouseTempC = parts[4].toFloat();
+  }
+  if (parts[5].length() > 0) {
+    entry.hasBatteryVoltage = true;
+    entry.batteryVoltage = parts[5].toFloat();
+  }
+  entry.event = parts[6];
+  entryOut = entry;
+  return true;
+}
+
+void loadDoorHistoryFromDisk() {
+  if (!ensureFileSystem()) {
+    return;
+  }
+  if (!LittleFS.exists(DOOR_HISTORY_CSV_PATH)) {
+    return;
+  }
+  File file = LittleFS.open(DOOR_HISTORY_CSV_PATH, "r");
+  if (!file) {
+    Serial.println("Failed to open door history CSV.");
+    return;
+  }
+  bool headerSkipped = false;
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    if (!headerSkipped) {
+      headerSkipped = true;
+      continue;
+    }
+    DoorHistoryEntry entry;
+    if (parseDoorHistoryCsvLine(line, entry)) {
+      pushDoorHistoryEntry(entry);
+      if (entry.timestamp > 0 && entry.event == "hourly") {
+        lastHourlyBucket = entry.timestamp - (entry.timestamp % DOOR_HISTORY_HOURLY_SECONDS);
+      }
+    }
+  }
+  file.close();
+}
+
+void trimDoorHistoryCsv() {
+  if (!ensureFileSystem()) {
+    return;
+  }
+  File file = LittleFS.open(DOOR_HISTORY_CSV_PATH, "r");
+  if (!file) {
+    return;
+  }
+  const size_t size = file.size();
+  if (size <= DOOR_HISTORY_MAX_BYTES) {
+    file.close();
+    return;
+  }
+  std::vector<String> lines;
+  while (file.available()) {
+    lines.push_back(file.readStringUntil('\n'));
+  }
+  file.close();
+  if (lines.empty()) {
+    return;
+  }
+  const String header = lines.front();
+  std::vector<String> data(lines.begin() + 1, lines.end());
+  size_t total = header.length() + 1;
+  std::vector<String> kept;
+  kept.reserve(data.size());
+  for (auto it = data.rbegin(); it != data.rend(); ++it) {
+    total += it->length() + 1;
+    if (total > DOOR_HISTORY_MAX_BYTES) {
+      break;
+    }
+    kept.push_back(*it);
+  }
+  std::reverse(kept.begin(), kept.end());
+  file = LittleFS.open(DOOR_HISTORY_CSV_PATH, "w");
+  if (!file) {
+    Serial.println("Failed to trim door history CSV.");
+    return;
+  }
+  file.print(header);
+  if (!header.endsWith("\n")) {
+    file.print('\n');
+  }
+  for (const auto &line : kept) {
+    file.print(line);
+    if (!line.endsWith("\n")) {
+      file.print('\n');
+    }
+  }
+  file.close();
+}
+
+void appendDoorHistoryCsv(const DoorHistoryEntry &entry) {
+  if (!ensureFileSystem()) {
+    return;
+  }
+  const bool exists = LittleFS.exists(DOOR_HISTORY_CSV_PATH);
+  File file = LittleFS.open(DOOR_HISTORY_CSV_PATH, exists ? "a" : "w");
+  if (!file) {
+    Serial.println("Unable to append door history CSV.");
+    return;
+  }
+  if (!exists) {
+    file.print(DOOR_HISTORY_CSV_HEADER);
+  }
+  file.print(formatDoorHistoryCsvLine(entry));
+  file.close();
+  trimDoorHistoryCsv();
+}
+
+time_t currentTimestamp() {
+  const time_t nowTs = time(nullptr);
+  if (nowTs > 1600000000) {
+    return nowTs;
+  }
+  return 0;
+}
+
+bool recordDoorHistory(const char *eventLabel) {
+  if (!ensureFileSystem()) {
+    return false;
+  }
+  time_t nowTs = currentTimestamp();
+  if (nowTs == 0 && WiFi.status() == WL_CONNECTED && !clockSynchronized) {
+    syncClock();
+    nowTs = currentTimestamp();
+  }
+  if (nowTs == 0) {
+    return false;
+  }
+  const SensorReadings readings = getSensorReadings();
+  DoorHistoryEntry entry;
+  entry.timestamp = nowTs;
+  entry.doorState = getDoorPosition();
+  entry.hasBatteryTemp = readings.hasBatteryTemp;
+  entry.batteryTempC = readings.batteryTempC;
+  entry.hasGreenhouseTemp = readings.hasGreenhouseTemp;
+  entry.greenhouseTempC = readings.greenhouseTempC;
+  entry.hasBatteryVoltage = readings.hasBatteryVoltage;
+  entry.batteryVoltage = readings.batteryVoltage;
+  entry.event = eventLabel ? eventLabel : "event";
+  pushDoorHistoryEntry(entry);
+  appendDoorHistoryCsv(entry);
+  return true;
+}
+
+void maybeRecordHourlyHistory() {
+  const time_t nowTs = currentTimestamp();
+  if (nowTs == 0) {
+    return;
+  }
+  const time_t bucket = nowTs - (nowTs % DOOR_HISTORY_HOURLY_SECONDS);
+  if (bucket == 0 || bucket == lastHourlyBucket) {
+    return;
+  }
+  if (recordDoorHistory("hourly")) {
+    lastHourlyBucket = bucket;
+  }
+}
+
+bool waitForSerial(uint32_t timeoutMs) {
+  const uint32_t start = millis();
+  while (!Serial) {
+    if (timeoutMs > 0 && millis() - start >= timeoutMs) {
+      return false;
+    }
+    delay(10);
+  }
+  serialConsoleAttached = true;
+  return true;
+}
+
+void updateSerialAttachmentAnnounce() {
+  if (!serialConsoleAttached && Serial) {
+    serialConsoleAttached = true;
+  }
+  if (serialConsoleAttached && !serialAnnouncementSent) {
+    Serial.println(F("Serial console connected."));
+    serialAnnouncementSent = true;
   }
 }
 
@@ -573,8 +901,9 @@ void handleOptions() {
 }
 
 void handleApiRoot() {
-  String json = F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\","
-                  "\"/api/door/open\",\"/api/door/close\",\"/api/sensors\"]}");
+  String json =
+      F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
+        "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -585,6 +914,57 @@ void handleDoorStatus() {
 void handleSensorsEndpoint() {
   const SensorReadings readings = getSensorReadings();
   sendJsonResponse(200, sensorReadingsToJson(readings));
+}
+
+void handleDoorHistoryEndpoint() {
+  const size_t total = doorHistoryEntries.size();
+  const size_t limit = total > DOOR_HISTORY_DISPLAY_LIMIT ? DOOR_HISTORY_DISPLAY_LIMIT : total;
+  if (limit == 0) {
+    sendJsonResponse(200, F("[]"));
+    return;
+  }
+  String json;
+  json.reserve(limit * 96 + 2);
+  json += '[';
+  for (size_t idx = 0; idx < limit; ++idx) {
+    const DoorHistoryEntry &entry = doorHistoryEntries[total - 1 - idx];
+    if (idx > 0) {
+      json += ',';
+    }
+    json += F("{\"timestamp\":");
+    json += String(static_cast<unsigned long>(entry.timestamp));
+    json += F(",\"doorState\":\"");
+    json += doorStateToString(entry.doorState);
+    json += F("\",\"batteryTempC\":");
+    json += entry.hasBatteryTemp ? String(entry.batteryTempC, 2) : F("null");
+    json += F(",\"greenhouseTempC\":");
+    json += entry.hasGreenhouseTemp ? String(entry.greenhouseTempC, 2) : F("null");
+    json += F(",\"batteryVoltage\":");
+    json += entry.hasBatteryVoltage ? String(entry.batteryVoltage, 2) : F("null");
+    json += F(",\"event\":\"");
+    json += escapeJson(entry.event);
+    json += F("\"}");
+  }
+  json += ']';
+  sendJsonResponse(200, json);
+}
+
+void handleDoorHistoryCsv() {
+  if (!ensureFileSystem()) {
+    apiServer.send(500, F("text/plain"), F("Storage unavailable."));
+    return;
+  }
+  if (!LittleFS.exists(DOOR_HISTORY_CSV_PATH)) {
+    apiServer.send(200, F("text/csv"), DOOR_HISTORY_CSV_HEADER);
+    return;
+  }
+  File file = LittleFS.open(DOOR_HISTORY_CSV_PATH, "r");
+  if (!file) {
+    apiServer.send(500, F("text/plain"), F("Unable to read history.csv"));
+    return;
+  }
+  apiServer.streamFile(file, F("text/csv"));
+  file.close();
 }
 
 String doorCommandResponseToJson(const __FlashStringHelper *actionLabel, DoorCommandResult result) {
@@ -645,11 +1025,13 @@ void startApiServer() {
   apiServer.on("/api/", HTTP_GET, handleApiRoot);
   apiServer.on("/api/status", HTTP_GET, handleStatusEndpoint);
   apiServer.on("/api/sensors", HTTP_GET, handleSensorsEndpoint);
+  apiServer.on("/api/history", HTTP_GET, handleDoorHistoryEndpoint);
   apiServer.on("/api/door", HTTP_GET, handleDoorStatus);
   apiServer.on("/api/door/open", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/door/open", HTTP_POST, handleDoorOpen);
   apiServer.on("/api/door/close", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/door/close", HTTP_POST, handleDoorClose);
+  apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
   apiServerEnabled = true;
@@ -663,12 +1045,17 @@ void startApiServer() {
 //==============================================================================
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    // wait for serial port to connect (needed for native USB ports)
+  const bool serialReady = waitForSerial(SERIAL_WAIT_TIMEOUT_MS);
+  if (!serialReady) {
+    Serial.println(F("Serial console not detected within timeout; continuing headless."));
+  } else {
+    updateSerialAttachmentAnnounce();
   }
   Serial.println("Booting coop door controller...");
 
   initDoorHardware();
+  ensureFileSystem();
+  loadDoorHistoryFromDisk();
   const DoorState bootState = getDoorPosition();
   Serial.printf("Boot-time door position: %s.\n", doorStateToString(bootState));
   logDoorStatusIfChanged(F("boot"), bootState);
@@ -684,12 +1071,16 @@ void setup() {
   logSensorReadings();
 
   if (wifiReady) {
+    syncClock();
     startApiServer();
   }
+  recordDoorHistory("boot");
 }
 
 void loop() {
+  updateSerialAttachmentAnnounce();
   updateDoorMotion();
+  maybeRecordHourlyHistory();
   if (apiServerEnabled) {
     apiServer.handleClient();
   }
@@ -845,4 +1236,18 @@ bool connectToWifi() {
     Serial.println("All connection attempts failed.");
   }
   return false;
+}
+
+void syncClock() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+  struct tm timeinfo;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    if (getLocalTime(&timeinfo, 5000)) {
+      clockSynchronized = true;
+      Serial.println("Time synchronized via NTP.");
+      return;
+    }
+    delay(500);
+  }
+  Serial.println("Time synchronization failed.");
 }

@@ -8,7 +8,7 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_DIST = ROOT / 'webui' / 'dist'
+DEFAULT_DIST = ROOT / 'webui'
 DEFAULT_OUTPUT = ROOT / 'src' / 'web_assets_generated.cpp'
 
 CONTENT_TYPES = {
@@ -17,6 +17,32 @@ CONTENT_TYPES = {
     '.css': 'text/css; charset=utf-8',
     '.js': 'application/javascript',
 }
+
+ALLOWED_SUFFIXES = {
+    '.html',
+    '.htm',
+    '.css',
+    '.js',
+    '.json',
+    '.svg',
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.gif',
+    '.ico',
+    '.txt',
+    '.webmanifest',
+    '.map',
+    '.woff',
+    '.woff2',
+    '.ttf',
+    '.otf',
+    '.webp',
+    '.mp3',
+    '.mp4',
+}
+
+ALLOWED_BARE_FILENAMES = {'CNAME', 'robots.txt'}
 
 mimetypes.add_type('application/javascript', '.js')
 
@@ -40,11 +66,26 @@ def emit_byte_array(name: str, data: bytes) -> str:
     return f'static const uint8_t {name}[] PROGMEM = {{\n{body}\n}};\n'
 
 
+def should_embed(path: pathlib.Path) -> bool:
+    if path.name.startswith('.'):
+        return False
+    suffix = path.suffix.lower()
+    if suffix:
+        return suffix in ALLOWED_SUFFIXES
+    return path.name in ALLOWED_BARE_FILENAMES
+
+
 def generate(dist: pathlib.Path, output: pathlib.Path) -> None:
     if not dist.exists():
         raise SystemExit(f"Dist folder '{dist}' does not exist. Run 'npm run build' inside webui first.")
 
-    files = sorted([path for path in dist.rglob('*') if path.is_file()])
+    files = sorted(
+        [
+            path
+            for path in dist.rglob('*')
+            if path.is_file() and should_embed(path)
+        ]
+    )
     if not files:
         raise SystemExit(f"No files found under '{dist}'.")
 
@@ -77,7 +118,7 @@ def generate(dist: pathlib.Path, output: pathlib.Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='Embed built web assets into PROGMEM arrays.')
+    parser = argparse.ArgumentParser(description='Embed static web assets into PROGMEM arrays.')
     parser.add_argument('--dist', type=pathlib.Path, default=DEFAULT_DIST)
     parser.add_argument('--output', type=pathlib.Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()

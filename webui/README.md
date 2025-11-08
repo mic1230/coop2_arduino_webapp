@@ -1,43 +1,40 @@
-# Svelte + Vite
+# Coop Door Web UI
 
-This template should help get you started developing with Svelte in Vite.
+The Svelte/Vite stack has been replaced with a zero-build interface that uses plain HTML, Pico.css, and vanilla JavaScript. Everything the controller needs lives in this folder, so deployment is as simple as copying three files.
 
-## Recommended IDE Setup
+## Files
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+- `index.html` &mdash; markup plus Pico.css reference.
+- `styles.css` &mdash; lightweight overrides for cards, chips, and countdown visuals.
+- `app.js` &mdash; polling logic, countdown handling, and door command helpers.
 
-## Need an official Svelte framework?
+## Running locally
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+Because the UI fetches `/api/*` endpoints, open it through any lightweight HTTP server so relative requests keep working:
 
-## Technical considerations
-
-**Why use this over SvelteKit?**
-
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `checkJs` in the JS template?**
-
-It is likely that most cases of changing variable types in runtime are likely to be accidental, rather than deliberate. This provides advanced typechecking out of the box. Should you like to take advantage of the dynamically-typed nature of JavaScript, it is trivial to change the configuration.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/sveltejs/svelte-hmr/tree/master/packages/svelte-hmr#preservation-of-local-state).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```js
-// store.js
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```powershell
+cd webui
+python -m http.server 4173
 ```
+
+Then visit `http://<controller-host>:4173` in your browser. Swap the host/port to match how you serve the firmware.
+
+## Customizing
+
+- Timing constants live at the top of `app.js` if the firmware's travel time changes.
+- Styles can be tweaked in `styles.css` without rebuilding anything.
+- To add new data points, extend the markup in `index.html` and update the render logic inside `app.js`.
+
+No npm install, bundlers, or hot module reloading is required anymore; edit the files directly and refresh the browser.
+
+## Embedding into the ESP32 firmware
+
+Whenever you change any of the files above, regenerate the embedded asset blob before flashing:
+
+```powershell
+cd ..
+python tools/embed_web_assets.py --dist webui
+pio run -t upload
+```
+
+The helper script now reads straight from this directory (no build step), so what you edit here is exactly what the ESP32 will serve.
