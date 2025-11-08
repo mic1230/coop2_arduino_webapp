@@ -4,12 +4,18 @@
 int myFunction(int, int);
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+  Serial.begin(115200);
+  while (!Serial) {
+    // wait for serial port to connect (needed for native USB ports)
+  }
+  Serial.println("Setup complete.");
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  static uint32_t counter = 0;
+  Serial.print("Heartbeat ");
+  Serial.println(counter++);
+  delay(1000);  // wait one second before printing again
 }
 
 // put function definitions here:
