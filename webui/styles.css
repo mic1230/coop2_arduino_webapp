@@ -129,9 +129,14 @@ button:disabled {
 }
 
 .cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 1rem;
+}
+
+.cards > .card {
+  width: min(100%, 860px);
+  align-self: center;
 }
 
 .card {
@@ -143,6 +148,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  width: 100%;
 }
 
 .card-header {
@@ -404,6 +410,10 @@ button.action-button.active-action {
   }
 
   button.ghost {
+    width: 100%;
+  }
+
+  .cards > .card {
     width: 100%;
   }
 }
