@@ -46,6 +46,7 @@ constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 5000;
 constexpr const char *WIFI_CREDENTIAL_PATH = "/wifi_config.json";
 constexpr const char *WIFI_CONFIG_AP_SSID = "CoopDoorSetup";
+constexpr uint32_t CONFIG_PORTAL_ANNOUNCE_INTERVAL_MS = 15000;
 
 struct StoredCredential {
   String ssid;
@@ -63,6 +64,8 @@ void configureConfigRoutes();
 void handleConfigRoot();
 void handleConfigSubmit();
 void startConfigPortal();
+void announceConfigPortalStatus(bool force = false);
+void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 String escapeHtml(const String &value);
 
 //==============================================================================
@@ -74,6 +77,7 @@ constexpr uint32_t DOOR_TRAVEL_TIME_MS = 5000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
 constexpr bool TEST_MODE = false;  // When true, relays are not driven; logs only.
+constexpr bool SERIAL_HEARTBEAT_ENABLED = false;
 constexpr bool VERBOSE_LOGS = false;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
 
@@ -141,6 +145,8 @@ void updateSerialAttachmentAnnounce();
 WebServer apiServer(80);
 bool apiServerEnabled = false;
 bool configPortalActive = false;
+uint32_t lastConfigPortalAnnounceMs = 0;
+bool configPortalAnnouncementSent = false;
 
 Preferences doorPrefs;
 constexpr char PREF_NAMESPACE[] = "coopdoor";
@@ -1191,6 +1197,53 @@ void handleConfigSubmit() {
 
 void handleScanWifi();
 
+void announceConfigPortalStatus(bool force) {
+  if (!configPortalActive) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (!force && configPortalAnnouncementSent &&
+      now - lastConfigPortalAnnounceMs < CONFIG_PORTAL_ANNOUNCE_INTERVAL_MS) {
+    return;
+  }
+  IPAddress apIp = WiFi.softAPIP();
+  if (apIp == IPAddress(0, 0, 0, 0)) {
+    apIp = IPAddress(192, 168, 4, 1);
+  }
+  Serial.print("Config portal active. Connect to SSID '");
+  Serial.print(WIFI_CONFIG_AP_SSID);
+  Serial.print("' and browse to http://");
+  Serial.println(apIp.toString());
+  configPortalAnnouncementSent = true;
+  lastConfigPortalAnnounceMs = now;
+}
+
+void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (!configPortalActive) {
+    return;
+  }
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED: {
+      const wifi_event_ap_staconnected_t &connected = info.wifi_ap_staconnected;
+      Serial.printf("Wi-Fi client %02X:%02X:%02X:%02X:%02X:%02X joined config AP (AID %u).\n",
+                    connected.mac[0], connected.mac[1], connected.mac[2], connected.mac[3],
+                    connected.mac[4], connected.mac[5], connected.aid);
+      announceConfigPortalStatus(true);
+      break;
+    }
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: {
+      const wifi_event_ap_stadisconnected_t &disconnected = info.wifi_ap_stadisconnected;
+      Serial.printf(
+          "Wi-Fi client %02X:%02X:%02X:%02X:%02X:%02X left config AP (AID %u).\n",
+          disconnected.mac[0], disconnected.mac[1], disconnected.mac[2], disconnected.mac[3],
+          disconnected.mac[4], disconnected.mac[5], disconnected.aid);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 void configureConfigRoutes() {
   apiServer.on("/", HTTP_GET, handleConfigRoot);
   apiServer.on("/configure", HTTP_POST, handleConfigSubmit);
@@ -1216,6 +1269,8 @@ void handleScanWifi() {
 
 void startConfigPortal() {
   configPortalActive = true;
+  configPortalAnnouncementSent = false;
+  lastConfigPortalAnnounceMs = 0;
   apiServer.stop();
   WiFi.disconnect(true, true);
   delay(100);
@@ -1226,10 +1281,7 @@ void startConfigPortal() {
   IPAddress apIp(192, 168, 4, 1);
   IPAddress netmask(255, 255, 255, 0);
   WiFi.softAPConfig(apIp, apIp, netmask);
-  Serial.print("Config portal active. Connect to SSID '");
-  Serial.print(WIFI_CONFIG_AP_SSID);
-  Serial.print("' and browse to http://");
-  Serial.println(apIp.toString());
+  announceConfigPortalStatus(true);
   configureConfigRoutes();
   apiServer.begin();
   apiServerEnabled = true;
@@ -1269,6 +1321,7 @@ void setup() {
     updateSerialAttachmentAnnounce();
   }
   Serial.println("Booting coop door controller...");
+  WiFi.onEvent(handleWifiEvent);
 
   initDoorHardware();
   ensureFileSystem();
@@ -1298,10 +1351,11 @@ void loop() {
   updateSerialAttachmentAnnounce();
   updateDoorMotion();
   maybeRecordHourlyHistory();
+  announceConfigPortalStatus();
   // Heartbeat: emit a short line every second when a serial console is attached
   static uint32_t lastHeartbeatMs = 0;
   const uint32_t nowMs = millis();
-  if (TEST_MODE && serialConsoleAttached && nowMs - lastHeartbeatMs >= 1000) {
+  if (SERIAL_HEARTBEAT_ENABLED && serialConsoleAttached && nowMs - lastHeartbeatMs >= 1000) {
     Serial.println(F("[hb] alive"));
     lastHeartbeatMs = nowMs;
   }
