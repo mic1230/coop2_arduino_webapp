@@ -13,36 +13,11 @@
         <div>
           <h1>Coop Door</h1>
           <p class="subtle" data-last-updated>Waiting for controller&hellip;</p>
-          <p class="subtle small" data-device-target>Device target: this site</p>
         </div>
         <div class="header-actions">
           <button type="button" class="ghost" id="refresh-btn">Refresh</button>
-          <button type="button" class="ghost" id="device-target-btn">Change device</button>
         </div>
       </header>
-
-      <section class="device-panel" data-device-panel hidden>
-        <form class="device-form" data-device-form>
-          <label for="device-target-input">Controller address</label>
-          <input
-            id="device-target-input"
-            type="text"
-            placeholder="http://192.168.4.1 or /proxy-path"
-            autocomplete="off"
-            spellcheck="false"
-            data-device-input
-          />
-          <p class="subtle small">
-            Enter the ESP32 IP/hostname (e.g. 192.168.0.10, http://coop-door.local) or a proxy path
-            such as /controller. Leave empty to talk to this site.
-          </p>
-          <div class="device-form-actions">
-            <button type="submit" class="action-button small">Use address</button>
-            <button type="button" class="ghost small" data-device-reset>Reset</button>
-          </div>
-          <p class="device-form-message subtle small" data-device-message hidden></p>
-        </form>
-      </section>
 
       <div class="tab-bar" role="tablist">
         <button type="button" class="tab-button active" data-tab-btn="dashboard" role="tab" aria-selected="true">
@@ -216,11 +191,27 @@
               <button type="submit" class="action-button" data-wifi-submit>Save settings</button>
             </div>
           </form>
+          <section class="timezone-section" data-timezone-section>
+            <div class="timezone-header">
+              <h3>Device timezone</h3>
+              <p class="subtle small">
+                Pick the timezone the controller uses for its clock, on-screen history, and exports.
+              </p>
+            </div>
+            <button type="button" class="timezone-trigger" data-timezone-trigger>
+              <span class="timezone-label" data-timezone-label>UTC</span>
+              <span class="timezone-offset" data-timezone-offset>UTC±00:00</span>
+            </button>
+            <div class="timezone-picker" data-timezone-picker hidden>
+              <div class="timezone-options" data-timezone-options></div>
+            </div>
+            <p class="subtle small" data-timezone-message hidden></p>
+          </section>
           <p class="subtle small" data-wifi-ap-hint hidden></p>
           <p class="subtle small" data-wifi-config-meta></p>
         </article>
       </section>
     </main>
-    <script src="./app.js?v=20251108.1" type="module"></script>
+    <script src="./app.js?v=20251109.0" type="module"></script>
   </body>
 </html>

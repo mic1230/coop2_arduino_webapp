@@ -10,14 +10,13 @@ The Svelte/Vite stack has been replaced with a zero-build interface that uses pl
 
 ## Running locally
 
-Because the UI fetches `/api/*` endpoints, open it through any lightweight HTTP server so requests are handled over HTTP/S:
+The production setup assumes the UI is hosted from the same ESP32 that exposes `/api/*`, so every request is relative and the firmware’s own IP is used automatically. If you want to poke at the files from your laptop during development, serve them through any lightweight HTTP server so the browser will still make HTTP requests:
 
 ```powershell
 cd webui
 python -m http.server 4173
 ```
-
-Browse to wherever you host it (for example `http://localhost:4173`) and use the **Change device** button to enter the controller's IP/host (or append `?device=http://192.168.4.1` to the URL). When the files are served directly from the ESP32 you can skip this step because the UI talks to the same origin automatically.
+Then browse to `http://localhost:4173` (or whatever host/port you use); the UI will talk to the same origin just like it does on the controller.
 
 ## Customizing
 

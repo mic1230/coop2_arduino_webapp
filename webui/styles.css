@@ -40,49 +40,6 @@ body {
   font-size: clamp(1.8rem, 3vw, 2.4rem);
 }
 
-.device-panel {
-  border: 1px solid var(--coop-border);
-  border-radius: 1rem;
-  padding: 1rem 1.25rem;
-  background: rgba(255, 255, 255, 0.8);
-}
-
-.device-form {
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
-}
-
-.device-form input {
-  width: 100%;
-  padding: 0.65rem 0.85rem;
-  border-radius: 0.75rem;
-  border: 1px solid var(--coop-border);
-  background: rgba(255, 255, 255, 0.95);
-  font-size: 1rem;
-}
-
-.device-form-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.device-form-actions button {
-  flex: 0 1 180px;
-}
-
-.device-form-message {
-  margin: 0;
-}
-
-.device-form-message.error {
-  color: #b91c1c;
-}
-
-.device-form-message.success {
-  color: #047857;
-}
 .tab-bar {
   display: inline-flex;
   gap: 0.5rem;
@@ -522,6 +479,85 @@ button.action-button.active-action {
   border: 1px solid var(--coop-border);
   background: rgba(255, 255, 255, 0.9);
   font-size: 1rem;
+}
+
+.timezone-section {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--coop-border);
+}
+
+.timezone-header h3 {
+  margin: 0 0 0.2rem;
+}
+
+.timezone-trigger {
+  width: 100%;
+  border: 1px solid var(--coop-border);
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.9);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  align-items: flex-start;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.timezone-trigger:hover {
+  border-color: #1d4ed8;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.15);
+}
+
+.timezone-picker {
+  margin-top: 0.75rem;
+  border: 1px solid var(--coop-border);
+  border-radius: 0.75rem;
+  max-height: 240px;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 0.25rem;
+}
+
+.timezone-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.timezone-option {
+  border: none;
+  background: transparent;
+  border-radius: 0.6rem;
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.95rem;
+}
+
+.timezone-option:hover {
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.timezone-option.active {
+  background: rgba(37, 99, 235, 0.15);
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.timezone-label {
+  font-weight: 600;
+}
+
+.timezone-offset {
+  font-size: 0.85rem;
+  color: var(--coop-muted);
 }
 
 .settings-actions {

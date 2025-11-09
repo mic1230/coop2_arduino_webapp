@@ -113,6 +113,38 @@ constexpr size_t DOOR_HISTORY_MAX_BYTES = 1024 * 1024;
 constexpr uint32_t DOOR_HISTORY_HOURLY_SECONDS = 60 * 60;
 constexpr const char *DOOR_HISTORY_CSV_HEADER =
     "timestamp,display_time,door_state,battery_temp_c,greenhouse_temp_c,battery_voltage,event\n";
+constexpr const char *DOOR_HISTORY_CSV_TEMP_PATH = "/door_history.tmp";
+
+struct TimezoneOption {
+  const char *id;
+  const char *label;
+  int offsetMinutes;
+};
+
+constexpr TimezoneOption TIMEZONE_OPTIONS[] = {
+    {"UTC-12", "UTC-12:00 Baker Island", -720},   {"UTC-11", "UTC-11:00 Niue", -660},
+    {"UTC-10", "UTC-10:00 Hawaii-Aleutian", -600},{"UTC-9", "UTC-09:00 Alaska", -540},
+    {"UTC-8", "UTC-08:00 Pacific", -480},         {"UTC-7", "UTC-07:00 Mountain", -420},
+    {"UTC-6", "UTC-06:00 Central", -360},         {"UTC-5", "UTC-05:00 Eastern", -300},
+    {"UTC-4", "UTC-04:00 Atlantic", -240},        {"UTC-3_30", "UTC-03:30 Newfoundland", -210},
+    {"UTC-3", "UTC-03:00 Argentina/Brazil", -180},{"UTC-2", "UTC-02:00 South Georgia", -120},
+    {"UTC-1", "UTC-01:00 Azores", -60},           {"UTC", "UTC", 0},
+    {"UTC+1", "UTC+01:00 Central Europe", 60},    {"UTC+2", "UTC+02:00 Eastern Europe", 120},
+    {"UTC+3", "UTC+03:00 Moscow", 180},           {"UTC+3_30", "UTC+03:30 Iran", 210},
+    {"UTC+4", "UTC+04:00 Gulf", 240},             {"UTC+4_30", "UTC+04:30 Afghanistan", 270},
+    {"UTC+5", "UTC+05:00 Pakistan", 300},         {"UTC+5_30", "UTC+05:30 India", 330},
+    {"UTC+5_45", "UTC+05:45 Nepal", 345},         {"UTC+6", "UTC+06:00 Bangladesh", 360},
+    {"UTC+6_30", "UTC+06:30 Myanmar", 390},       {"UTC+7", "UTC+07:00 Indochina", 420},
+    {"UTC+8", "UTC+08:00 China/West Aus", 480},   {"UTC+9", "UTC+09:00 Japan/Korea", 540},
+    {"UTC+9_30", "UTC+09:30 Central Australia", 570},
+    {"UTC+10", "UTC+10:00 Eastern Australia", 600},
+    {"UTC+10_30", "UTC+10:30 Lord Howe", 630},    {"UTC+11", "UTC+11:00 Magadan", 660},
+    {"UTC+12", "UTC+12:00 Fiji", 720},            {"UTC+12_45", "UTC+12:45 Chatham Islands", 765},
+    {"UTC+13", "UTC+13:00 Tonga", 780},           {"UTC+14", "UTC+14:00 Line Islands", 840}};
+constexpr size_t TIMEZONE_OPTION_COUNT = sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]);
+constexpr const char *DEFAULT_TIMEZONE_ID = "UTC";
+constexpr char PREF_KEY_TIMEZONE_ID[] = "tz_id";
+constexpr char PREF_KEY_TIMEZONE_RENDER_ID[] = "tz_render";
 
 struct DoorHistoryEntry;
 
@@ -152,6 +184,14 @@ bool serveEmbeddedAsset(WebServer &server, const String &requestPath);
 void handleWebIndex();
 void handleDoorHistoryEndpoint();
 void handleDoorHistoryCsv();
+void handleTimezoneStatus();
+void handleTimezoneUpdate();
+void loadTimezonePreference();
+bool persistTimezonePreference(const String &timezoneId);
+const TimezoneOption *findTimezoneOption(const String &timezoneId);
+void ensureHistoryDisplayTimesCurrent();
+bool rewriteDoorHistoryCsvDisplayTimes();
+void applyTimezoneOption(const TimezoneOption &option);
 bool waitForSerial(uint32_t timeoutMs = SERIAL_WAIT_TIMEOUT_MS);
 void updateSerialAttachmentAnnounce();
 
@@ -226,6 +266,8 @@ std::vector<DoorHistoryEntry> doorHistoryEntries;
 bool fileSystemReady = false;
 time_t lastHourlyBucket = 0;
 bool clockSynchronized = false;
+String activeTimezoneId = DEFAULT_TIMEZONE_ID;
+int activeTimezoneOffsetMinutes = 0;
 static bool serialConsoleAttached = false;
 static bool serialAnnouncementSent = false;
 
@@ -611,12 +653,56 @@ void pushDoorHistoryEntry(const DoorHistoryEntry &entry) {
   }
 }
 
+const TimezoneOption *findTimezoneOption(const String &timezoneId) {
+  for (size_t idx = 0; idx < TIMEZONE_OPTION_COUNT; ++idx) {
+    const TimezoneOption &option = TIMEZONE_OPTIONS[idx];
+    if (timezoneId.equalsIgnoreCase(option.id)) {
+      return &option;
+    }
+  }
+  return nullptr;
+}
+
+void applyTimezoneOption(const TimezoneOption &option) {
+  activeTimezoneId = option.id;
+  activeTimezoneOffsetMinutes = option.offsetMinutes;
+}
+
+void loadTimezonePreference() {
+  const TimezoneOption *selected = findTimezoneOption(String(DEFAULT_TIMEZONE_ID));
+  if (selected == nullptr && TIMEZONE_OPTION_COUNT > 0) {
+    selected = &TIMEZONE_OPTIONS[0];
+  }
+  if (initDoorPreferences()) {
+    const String storedId =
+        doorPrefs.getString(PREF_KEY_TIMEZONE_ID, selected ? selected->id : DEFAULT_TIMEZONE_ID);
+    const TimezoneOption *stored = findTimezoneOption(storedId);
+    if (stored != nullptr) {
+      selected = stored;
+    }
+  }
+  if (selected != nullptr) {
+    applyTimezoneOption(*selected);
+  }
+}
+
+bool persistTimezonePreference(const String &timezoneId) {
+  if (!initDoorPreferences()) {
+    Serial.println("Unable to persist timezone preference (prefs unavailable).");
+    return false;
+  }
+  doorPrefs.putString(PREF_KEY_TIMEZONE_ID, timezoneId);
+  return true;
+}
+
 String formatHistoryTimestamp(time_t ts) {
   if (ts <= 0) {
     return String(F("1970-01-01 00:00:00"));
   }
+  const long offsetSeconds = static_cast<long>(activeTimezoneOffsetMinutes) * 60L;
+  time_t adjusted = ts + offsetSeconds;
   struct tm timeinfo;
-  gmtime_r(&ts, &timeinfo);
+  gmtime_r(&adjusted, &timeinfo);
   char buffer[20];
   std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
                 timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour,
@@ -720,6 +806,69 @@ void loadDoorHistoryFromDisk() {
     }
   }
   file.close();
+}
+
+bool rewriteDoorHistoryCsvDisplayTimes() {
+  if (!ensureFileSystem() || !LittleFS.exists(DOOR_HISTORY_CSV_PATH)) {
+    return false;
+  }
+  File input = LittleFS.open(DOOR_HISTORY_CSV_PATH, "r");
+  if (!input) {
+    Serial.println("Unable to open history.csv for timezone rewrite.");
+    return false;
+  }
+  File output = LittleFS.open(DOOR_HISTORY_CSV_TEMP_PATH, "w");
+  if (!output) {
+    Serial.println("Unable to open temporary history.csv for timezone rewrite.");
+    input.close();
+    return false;
+  }
+  output.print(DOOR_HISTORY_CSV_HEADER);
+  bool headerSkipped = false;
+  while (input.available()) {
+    String line = input.readStringUntil('\n');
+    if (!headerSkipped) {
+      headerSkipped = true;
+      continue;
+    }
+    DoorHistoryEntry entry;
+    if (!parseDoorHistoryCsvLine(line, entry)) {
+      continue;
+    }
+    output.print(formatDoorHistoryCsvLine(entry));
+  }
+  input.close();
+  output.close();
+  if (LittleFS.exists(DOOR_HISTORY_CSV_PATH) && !LittleFS.remove(DOOR_HISTORY_CSV_PATH)) {
+    Serial.println("Failed to remove original history.csv during timezone rewrite.");
+    LittleFS.remove(DOOR_HISTORY_CSV_TEMP_PATH);
+    return false;
+  }
+  if (!LittleFS.rename(DOOR_HISTORY_CSV_TEMP_PATH, DOOR_HISTORY_CSV_PATH)) {
+    Serial.println("Failed to rename timezone-updated history CSV.");
+    LittleFS.remove(DOOR_HISTORY_CSV_TEMP_PATH);
+    return false;
+  }
+  if (initDoorPreferences()) {
+    doorPrefs.putString(PREF_KEY_TIMEZONE_RENDER_ID, activeTimezoneId);
+  }
+  return true;
+}
+
+void ensureHistoryDisplayTimesCurrent() {
+  if (!initDoorPreferences()) {
+    return;
+  }
+  const String renderedId =
+      doorPrefs.getString(PREF_KEY_TIMEZONE_RENDER_ID, activeTimezoneId.c_str());
+  if (renderedId == activeTimezoneId) {
+    return;
+  }
+  if (rewriteDoorHistoryCsvDisplayTimes()) {
+    Serial.println("Door history CSV display times updated for new timezone.");
+  } else {
+    Serial.println("Door history CSV timezone update failed; retaining previous timestamps.");
+  }
 }
 
 void trimDoorHistoryCsv() {
@@ -1034,7 +1183,7 @@ void handleOptions() {
 void handleApiRoot() {
   String json =
       F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
-        "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/history.csv\"]}");
+        "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -1074,6 +1223,8 @@ void handleDoorHistoryEndpoint() {
     json += entry.hasBatteryVoltage ? String(entry.batteryVoltage, 2) : F("null");
     json += F(",\"event\":\"");
     json += escapeJson(entry.event);
+    json += F("\",\"displayTime\":\"");
+    json += formatHistoryTimestamp(entry.timestamp);
     json += F("\"}");
   }
   json += ']';
@@ -1257,6 +1408,79 @@ void handleWifiConfigUpdate() {
   }
 }
 
+void handleTimezoneStatus() {
+  const TimezoneOption *active = findTimezoneOption(activeTimezoneId);
+  String json;
+  json.reserve(512);
+  json += F("{\"timezoneId\":\"");
+  json += activeTimezoneId;
+  json += F("\",\"offsetMinutes\":");
+  json += activeTimezoneOffsetMinutes;
+  if (active != nullptr) {
+    json += F(",\"label\":\"");
+    json += escapeJson(active->label);
+    json += F("\"");
+  }
+  json += F(",\"options\":[");
+  for (size_t idx = 0; idx < TIMEZONE_OPTION_COUNT; ++idx) {
+    if (idx > 0) {
+      json += ',';
+    }
+    json += F("{\"id\":\"");
+    json += TIMEZONE_OPTIONS[idx].id;
+    json += F("\",\"label\":\"");
+    json += escapeJson(String(TIMEZONE_OPTIONS[idx].label));
+    json += F("\",\"offsetMinutes\":");
+    json += TIMEZONE_OPTIONS[idx].offsetMinutes;
+    json += F("}");
+  }
+  json += F("]}");
+  sendJsonResponse(200, json);
+}
+
+void handleTimezoneUpdate() {
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  StaticJsonDocument<128> doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
+    return;
+  }
+  const char *timezoneId = doc["id"] | "";
+  if (!timezoneId || std::strlen(timezoneId) == 0) {
+    sendJsonResponse(400, F("{\"error\":\"timezone_required\"}"));
+    return;
+  }
+  const TimezoneOption *option = findTimezoneOption(String(timezoneId));
+  if (option == nullptr) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_timezone\"}"));
+    return;
+  }
+  applyTimezoneOption(*option);
+  persistTimezonePreference(option->id);
+  ensureHistoryDisplayTimesCurrent();
+  clockSynchronized = false;
+  syncClock();
+  String json;
+  json.reserve(256);
+  json += F("{\"timezoneId\":\"");
+  json += activeTimezoneId;
+  json += F("\",\"offsetMinutes\":");
+  json += activeTimezoneOffsetMinutes;
+  json += F(",\"label\":\"");
+  json += escapeJson(option->label);
+  json += F("\"}");
+  sendJsonResponse(200, json);
+}
+
 void announceConfigPortalStatus(bool force) {
   if (!configPortalActive) {
     return;
@@ -1403,6 +1627,9 @@ void startApiServer() {
   apiServer.on("/api/wifi/config", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/wifi/config", HTTP_GET, handleWifiConfigStatus);
   apiServer.on("/api/wifi/config", HTTP_POST, handleWifiConfigUpdate);
+  apiServer.on("/api/timezone", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/timezone", HTTP_GET, handleTimezoneStatus);
+  apiServer.on("/api/timezone", HTTP_POST, handleTimezoneUpdate);
   apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
@@ -1428,6 +1655,7 @@ void setup() {
 
   initDoorHardware();
   ensureFileSystem();
+  loadTimezonePreference();
   initWifiPreferences();
   if (!retainWifiCredentialsAfterReboot) {
     if (eraseStoredCredential()) {
@@ -1437,6 +1665,7 @@ void setup() {
     }
   }
   loadDoorHistoryFromDisk();
+  ensureHistoryDisplayTimesCurrent();
   logSensorReadings();
   const DoorState bootState = getDoorPosition();
   Serial.printf("Boot-time door position: %s.\n", doorStateToString(bootState));
@@ -1664,7 +1893,8 @@ bool connectToWifi() {
 }
 
 void syncClock() {
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+  const long offsetSeconds = static_cast<long>(activeTimezoneOffsetMinutes) * 60L;
+  configTime(offsetSeconds, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
   struct tm timeinfo;
   for (int attempt = 0; attempt < 10; ++attempt) {
     if (getLocalTime(&timeinfo, 5000)) {
