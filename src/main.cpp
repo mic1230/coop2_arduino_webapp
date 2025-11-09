@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
+#include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include <esp32-hal-adc.h>
 #include <OneWire.h>
@@ -11,6 +12,7 @@
 #include <LittleFS.h>
 #include <time.h>
 #include <vector>
+#include <cstring>
 #include <algorithm>
 
 #include "web_assets.h"
@@ -40,28 +42,45 @@ constexpr uint8_t MAX_RETRIES = 3;
 constexpr uint8_t STATUS_CHECK_ITERATIONS = 10;
 constexpr uint32_t STATUS_CHECK_DELAY_MS = 5000;
 constexpr uint32_t INTERNET_CHECK_TIMEOUT_MS = 5000;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr uint32_t WIFI_RETRY_DELAY_MS = 5000;
+constexpr const char *WIFI_CREDENTIAL_PATH = "/wifi_config.json";
+constexpr const char *WIFI_CONFIG_AP_SSID = "CoopDoorSetup";
+
+struct StoredCredential {
+  String ssid;
+  String password;
+};
 
 bool checkInternet();
 size_t collectConfiguredNetworks(NetworkCandidate *candidates, size_t maxCandidates);
 void sortCandidates(NetworkCandidate *candidates, size_t count);
 bool connectToWifi();
+bool attemptWifiConnection(const char *ssid, const char *password);
+bool loadStoredCredential(StoredCredential &cred);
+bool saveStoredCredential(const String &ssid, const String &password);
+void configureConfigRoutes();
+void handleConfigRoot();
+void handleConfigSubmit();
+void startConfigPortal();
+String escapeHtml(const String &value);
 
 //==============================================================================
 // Door control (ported from MicroPython open_door / close_door)
 //==============================================================================
-constexpr uint8_t RELAY_OPEN_PIN = 19;   // Relay that drives the OPEN direction
-constexpr uint8_t RELAY_CLOSE_PIN = 17;  // Relay that drives the CLOSE direction
+constexpr uint8_t RELAY_OPEN_PIN = 4;   // Relay that drives the OPEN direction
+constexpr uint8_t RELAY_CLOSE_PIN = 5;  // Relay that drives the CLOSE direction
 constexpr uint32_t DOOR_TRAVEL_TIME_MS = 5000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
-constexpr bool TEST_MODE = true;  // When true, relays are not driven; logs only.
+constexpr bool TEST_MODE = false;  // When true, relays are not driven; logs only.
 constexpr bool VERBOSE_LOGS = false;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
 
 //==============================================================================
 // Sensor configuration (ported from MicroPython get_sensor_readings)
 //==============================================================================
-constexpr uint8_t DS18B20_PIN = 20;
+constexpr uint8_t DS18B20_PIN = 3;
 constexpr uint8_t BATTERY_ADC_PIN = 1;  // Matches MicroPython's ADC Pin 1
 constexpr float ADC_REFERENCE_VOLTS = 3.3f;
 constexpr float VOLTAGE_DIVIDER_RATIO = 0.8333f;  // 10k / (10k + 2k)
@@ -80,7 +99,7 @@ constexpr const char *DOOR_HISTORY_CSV_HEADER =
 
 struct DoorHistoryEntry;
 
-OneWire onewireBus(DS18B20_PIN);
+OneWire onewireBus;
 DallasTemperature temperatureBus(&onewireBus);
 
 const DeviceAddress BATTERY_TEMP_ADDRESS = {0x28, 0xA5, 0x35, 0x57, 0x04, 0xE1, 0x3C, 0x93};
@@ -121,6 +140,7 @@ void updateSerialAttachmentAnnounce();
 
 WebServer apiServer(80);
 bool apiServerEnabled = false;
+bool configPortalActive = false;
 
 Preferences doorPrefs;
 constexpr char PREF_NAMESPACE[] = "coopdoor";
@@ -366,9 +386,10 @@ DoorCommandResult closeDoor() {
 //==============================================================================
 void initTemperatureSensors() {
   static bool initialized = false;
-  if (initialized) {
+  if (initialized || TEST_MODE) {
     return;
   }
+  onewireBus.begin(DS18B20_PIN);
   temperatureBus.begin();
   temperatureBus.setWaitForConversion(false);
   if (VERBOSE_LOGS) {
@@ -379,7 +400,7 @@ void initTemperatureSensors() {
 
 void initBatteryAdc() {
   static bool configured = false;
-  if (configured) {
+  if (configured || TEST_MODE) {
     return;
   }
   pinMode(BATTERY_ADC_PIN, INPUT);
@@ -410,6 +431,9 @@ bool readTemperature(const DeviceAddress address, const char *label, float &valu
 
 SensorReadings getSensorReadings() {
   SensorReadings readings;
+  if (TEST_MODE) {
+    return readings;
+  }
   initTemperatureSensors();
   if (VERBOSE_LOGS) {
     Serial.println("Requesting DS18B20 temperature readings...");
@@ -470,6 +494,49 @@ bool ensureFileSystem() {
   }
   fileSystemReady = true;
   return true;
+}
+
+bool loadStoredCredential(StoredCredential &cred) {
+  if (!ensureFileSystem() || !LittleFS.exists(WIFI_CREDENTIAL_PATH)) {
+    return false;
+  }
+  File file = LittleFS.open(WIFI_CREDENTIAL_PATH, "r");
+  if (!file) {
+    Serial.println("Failed to open Wi-Fi credential file.");
+    return false;
+  }
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    Serial.printf("Wi-Fi credential parse failed: %s\n", error.c_str());
+    return false;
+  }
+  const char *ssid = doc["ssid"];
+  if (!ssid || std::strlen(ssid) == 0) {
+    return false;
+  }
+  const char *password = doc["password"];
+  cred.ssid = ssid;
+  cred.password = password ? password : "";
+  return true;
+}
+
+bool saveStoredCredential(const String &ssid, const String &password) {
+  if (!ensureFileSystem()) {
+    return false;
+  }
+  StaticJsonDocument<256> doc;
+  doc["ssid"] = ssid;
+  doc["password"] = password;
+  File file = LittleFS.open(WIFI_CREDENTIAL_PATH, "w");
+  if (!file) {
+    Serial.println("Failed to open Wi-Fi credential file for writing.");
+    return false;
+  }
+  const size_t written = serializeJson(doc, file);
+  file.close();
+  return written > 0;
 }
 
 void pushDoorHistoryEntry(const DoorHistoryEntry &entry) {
@@ -991,6 +1058,35 @@ void handleDoorClose() {
   sendJsonResponse(200, doorCommandResponseToJson(F("close"), result));
 }
 
+String escapeHtml(const String &value) {
+  String escaped;
+  escaped.reserve(value.length());
+  for (size_t idx = 0; idx < static_cast<size_t>(value.length()); ++idx) {
+    const char ch = value.charAt(idx);
+    switch (ch) {
+      case '&':
+        escaped += F("&amp;");
+        break;
+      case '<':
+        escaped += F("&lt;");
+        break;
+      case '>':
+        escaped += F("&gt;");
+        break;
+      case '"':
+        escaped += F("&quot;");
+        break;
+      case '\'':
+        escaped += F("&#39;");
+        break;
+      default:
+        escaped += ch;
+        break;
+    }
+  }
+  return escaped;
+}
+
 void handleStatusEndpoint() {
   const DoorState state = getDoorPosition();
   const SensorReadings readings = getSensorReadings();
@@ -1007,6 +1103,10 @@ void handleStatusEndpoint() {
 }
 
 void handleNotFound() {
+  if (configPortalActive) {
+    handleConfigRoot();
+    return;
+  }
   if (serveEmbeddedAsset(apiServer, apiServer.uri())) {
     return;
   }
@@ -1016,6 +1116,123 @@ void handleNotFound() {
   json += escapeJson(apiServer.uri());
   json += F("\"}");
   sendJsonResponse(404, json);
+}
+
+void handleConfigRoot() {
+  StoredCredential stored;
+  String storedSsid;
+  if (loadStoredCredential(stored)) {
+    storedSsid = stored.ssid;
+  }
+  String page =
+      F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' "
+        "content='width=device-width,initial-scale=1'><title>Coop Door Setup</title>"
+        "<style>body{font-family:sans-serif;background:#f5f5f7;margin:0;padding:1.5rem;}"
+        ".card{max-width:420px;margin:0 auto;background:#fff;border-radius:12px;padding:1.5rem;"
+        "box-shadow:0 12px 25px rgba(15,23,42,0.15);}h1{margin-top:0;font-size:1.4rem;}"
+        "label{display:block;margin-top:1rem;font-size:0.9rem;color:#334155;}"
+        "input,select{width:100%;padding:0.65rem;border:1px solid #d0d5dd;border-radius:8px;font-size:1rem;}"
+        "button{margin-top:1.25rem;width:100%;padding:0.9rem;border:none;border-radius:8px;"
+        "background:#2563eb;color:#fff;font-size:1rem;font-weight:600;cursor:pointer;}"
+        "button:hover{background:#1d4fd8;}p.note{margin-top:1rem;font-size:0.85rem;color:#475569;}"
+        ".ssid-options{margin-top:0.5rem;max-height:180px;overflow-y:auto;border:1px solid #d0d5dd;"
+        "border-radius:8px;padding:0.35rem;display:none;} .ssid-options button{margin:2px 0;padding:0.4rem;"
+        "width:100%;border:1px solid #94a3b8;border-radius:6px;background:#f8fafc;color:#0f172a;font-weight:500;}"
+        ".ssid-options button:hover{background:#dbeafe;}"
+        "</style></head><body><div class='card'><h1>Configure Wi-Fi</h1>"
+        "<form method='POST' action='/configure'>"
+        "<label for='ssid'>Wi-Fi SSID</label>"
+        "<input id='ssid' name='ssid' required value='");
+  page += escapeHtml(storedSsid);
+  page +=
+      F("' autocomplete='off'>"
+        "<div class='ssid-options' id='ssid-options'></div>"
+        "<label for='password'>Password</label>"
+        "<input id='password' name='password' type='password' placeholder='Leave empty for open network'>"
+        "<button type='submit'>Save &amp; Reboot</button></form>"
+        "<p class='note'>After saving, the controller restarts and tries connecting with the new network.</p>"
+        "</div><script>(function(){var ssidInput=document.getElementById('ssid');"
+        "var options=document.getElementById('ssid-options');"
+        "function renderNetworks(list){if(!Array.isArray(list)||!list.length){options.style.display='none';return;}"
+        "options.innerHTML='';list.forEach(function(net){var btn=document.createElement('button');"
+        "btn.type='button';btn.textContent=net.ssid+(net.rssi?' ('+net.rssi+' dBm)':'');"
+        "btn.addEventListener('click',function(){ssidInput.value=net.ssid;options.style.display='none';});"
+        "options.appendChild(btn);});options.style.display='block';}"
+        "async function fetchNetworks(){options.innerHTML='Scanning...';options.style.display='block';"
+        "try{var response=await fetch('/scan');if(!response.ok)throw new Error('scan failed');"
+        "var payload=await response.json();renderNetworks(payload);}catch(error){options.innerHTML='Scan failed';}}"
+        "ssidInput.addEventListener('focus',function(){fetchNetworks();});})();</script>"
+        "</body></html>");
+  apiServer.send(200, F("text/html"), page);
+}
+
+void handleConfigSubmit() {
+  if (!apiServer.hasArg("ssid")) {
+    apiServer.send(400, F("text/plain"), F("Missing ssid"));
+    return;
+  }
+  String ssid = apiServer.arg("ssid");
+  String password = apiServer.arg("password");
+  ssid.trim();
+  password.trim();
+  if (ssid.isEmpty()) {
+    apiServer.send(400, F("text/plain"), F("SSID required"));
+    return;
+  }
+  if (!saveStoredCredential(ssid, password)) {
+    apiServer.send(500, F("text/plain"), F("Failed to store credentials"));
+    return;
+  }
+  apiServer.send(200, F("text/html"),
+                 F("<html><body><h2>Credentials saved.</h2><p>Rebooting...</p></body></html>"));
+  delay(500);
+  ESP.restart();
+}
+
+void handleScanWifi();
+
+void configureConfigRoutes() {
+  apiServer.on("/", HTTP_GET, handleConfigRoot);
+  apiServer.on("/configure", HTTP_POST, handleConfigSubmit);
+  apiServer.on("/scan", HTTP_GET, handleScanWifi);
+  apiServer.onNotFound(handleConfigRoot);
+}
+
+void handleScanWifi() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  const int16_t found = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
+  if (found > 0) {
+    for (int16_t idx = 0; idx < found; ++idx) {
+      JsonObject item = arr.add<JsonObject>();
+      item["ssid"] = WiFi.SSID(idx);
+      item["rssi"] = WiFi.RSSI(idx);
+    }
+  }
+  String payload;
+  serializeJson(doc, payload);
+  apiServer.send(200, F("application/json"), payload);
+}
+
+void startConfigPortal() {
+  configPortalActive = true;
+  apiServer.stop();
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  if (!WiFi.softAP(WIFI_CONFIG_AP_SSID)) {
+    Serial.println("Failed to start Wi-Fi config AP.");
+  }
+  IPAddress apIp(192, 168, 4, 1);
+  IPAddress netmask(255, 255, 255, 0);
+  WiFi.softAPConfig(apIp, apIp, netmask);
+  Serial.print("Config portal active. Connect to SSID '");
+  Serial.print(WIFI_CONFIG_AP_SSID);
+  Serial.print("' and browse to http://");
+  Serial.println(apIp.toString());
+  configureConfigRoutes();
+  apiServer.begin();
+  apiServerEnabled = true;
 }
 
 void startApiServer() {
@@ -1056,6 +1273,7 @@ void setup() {
   initDoorHardware();
   ensureFileSystem();
   loadDoorHistoryFromDisk();
+  logSensorReadings();
   const DoorState bootState = getDoorPosition();
   Serial.printf("Boot-time door position: %s.\n", doorStateToString(bootState));
   logDoorStatusIfChanged(F("boot"), bootState);
@@ -1065,15 +1283,14 @@ void setup() {
     Serial.print("Wi-Fi ready. IP address: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("Wi-Fi unavailable; API calls will be skipped.");
+    Serial.println("Wi-Fi unavailable; starting configuration portal.");
+    startConfigPortal();
+    recordDoorHistory("boot");
+    return;
   }
 
-  logSensorReadings();
-
-  if (wifiReady) {
-    syncClock();
-    startApiServer();
-  }
+  syncClock();
+  startApiServer();
   recordDoorHistory("boot");
 }
 
@@ -1081,6 +1298,13 @@ void loop() {
   updateSerialAttachmentAnnounce();
   updateDoorMotion();
   maybeRecordHourlyHistory();
+  // Heartbeat: emit a short line every second when a serial console is attached
+  static uint32_t lastHeartbeatMs = 0;
+  const uint32_t nowMs = millis();
+  if (TEST_MODE && serialConsoleAttached && nowMs - lastHeartbeatMs >= 1000) {
+    Serial.println(F("[hb] alive"));
+    lastHeartbeatMs = nowMs;
+  }
   if (apiServerEnabled) {
     apiServer.handleClient();
   }
@@ -1164,6 +1388,39 @@ void sortCandidates(NetworkCandidate *candidates, size_t count) {
   }
 }
 
+bool attemptWifiConnection(const char *ssid, const char *password) {
+  if (!ssid || std::strlen(ssid) == 0) {
+    return false;
+  }
+  Serial.printf("Connecting to Wi-Fi SSID '%s'...\n", ssid);
+  if (password && std::strlen(password) > 0) {
+    WiFi.begin(ssid, password);
+  } else {
+    WiFi.begin(ssid);
+  }
+  bool connected = false;
+  for (uint8_t waitCycle = 0; waitCycle < STATUS_CHECK_ITERATIONS; ++waitCycle) {
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      break;
+    }
+    delay(STATUS_CHECK_DELAY_MS);
+  }
+  if (!connected) {
+    Serial.println("Wi-Fi association timed out.");
+    WiFi.disconnect(true);
+    delay(500);
+    return false;
+  }
+  if (!checkInternet()) {
+    Serial.println("Connected but controller could not reach the internet.");
+    WiFi.disconnect(true);
+    delay(500);
+    return false;
+  }
+  return true;
+}
+
 bool connectToWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
@@ -1181,61 +1438,63 @@ bool connectToWifi() {
     }
   }
 
+  bool connected = false;
+  StoredCredential stored;
+  if (loadStoredCredential(stored)) {
+    Serial.printf("Attempting stored Wi-Fi credential for SSID '%s'.\n", stored.ssid.c_str());
+    connected = attemptWifiConnection(stored.ssid.c_str(), stored.password.c_str());
+    if (!connected) {
+      Serial.println("Stored credential failed.");
+    }
+  }
+
+  if (!connected && TEST_MODE) {
+    Serial.println("TEST MODE: Skipping default Wi-Fi credentials.");
+  }
+
   NetworkCandidate candidates[WIFI_NETWORK_COUNT] = {};
   const size_t candidateCount = collectConfiguredNetworks(candidates, WIFI_NETWORK_COUNT);
-  if (candidateCount == 0) {
+  if (!connected && !TEST_MODE) {
+    if (candidateCount == 0) {
+      Serial.println("No known Wi-Fi networks found.");
+    } else {
+      sortCandidates(candidates, candidateCount);
+      for (uint8_t attempt = 0; attempt < MAX_RETRIES && !connected; ++attempt) {
+        for (size_t idx = 0; idx < candidateCount && !connected; ++idx) {
+          const NetworkCandidate &candidate = candidates[idx];
+          if (attemptWifiConnection(candidate.credential->ssid, candidate.credential->password)) {
+            connected = true;
+            break;
+          }
+          if (VERBOSE_LOGS) {
+            Serial.printf("Failed to connect using configured network %s.\n",
+                          candidate.credential->ssid);
+          }
+          WiFi.disconnect(true);
+          delay(500);
+        }
+        if (!connected && attempt + 1 < MAX_RETRIES) {
+          delay(WIFI_RETRY_DELAY_MS);
+        }
+      }
+    }
+  }
+
+  if (!connected) {
+    Serial.println("All Wi-Fi connection attempts failed.");
     return false;
   }
-  sortCandidates(candidates, candidateCount);
 
-  for (uint8_t attempt = 0; attempt < MAX_RETRIES; ++attempt) {
-    const NetworkCandidate &primary = candidates[0];
-    if (VERBOSE_LOGS) {
-      Serial.printf("Attempt %u/%u: Connecting to %s...\n", attempt + 1, MAX_RETRIES,
-                    primary.credential->ssid);
-    }
-    WiFi.begin(primary.credential->ssid, primary.credential->password);
-
-    bool connected = false;
-    for (uint8_t waitCycle = 0; waitCycle < STATUS_CHECK_ITERATIONS; ++waitCycle) {
-      if (WiFi.status() == WL_CONNECTED) {
-        connected = true;
-        break;
-      }
-      if (VERBOSE_LOGS) {
-        Serial.print('.');
-      }
-      delay(STATUS_CHECK_DELAY_MS);
-    }
-    if (VERBOSE_LOGS) {
-      Serial.println();
-    }
-
-    if (connected) {
-      if (VERBOSE_LOGS) {
-        Serial.printf("Connected to %s\n", primary.credential->ssid);
-      }
-      if (checkInternet()) {
-        return true;
-      }
-      if (VERBOSE_LOGS) {
-        Serial.println("No internet access. Disconnecting...");
-      }
-      WiFi.disconnect(true);
-      delay(1000);
-    } else {
-      if (VERBOSE_LOGS) {
-        Serial.printf("Failed to connect to %s\n", primary.credential->ssid);
-      }
-      WiFi.disconnect(true);
-      delay(500);
-    }
-  }
-
-  if (VERBOSE_LOGS) {
-    Serial.println("All connection attempts failed.");
-  }
-  return false;
+  const uint64_t mac = ESP.getEfuseMac();
+  char hostname[32];
+  std::snprintf(hostname, sizeof(hostname), "coop-door-%06llX",
+                static_cast<unsigned long long>(mac & 0xFFFFFFULL));
+  WiFi.setHostname(hostname);
+  const String ipStr = WiFi.localIP().toString();
+  const String macStr = WiFi.macAddress();
+  Serial.printf("Connected to Wi-Fi. Hostname=%s, IP=%s, MAC=%s\n", hostname, ipStr.c_str(),
+                macStr.c_str());
+  return true;
 }
 
 void syncClock() {
