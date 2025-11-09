@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include <esp32-hal-adc.h>
@@ -45,8 +46,12 @@ constexpr uint32_t INTERNET_CHECK_TIMEOUT_MS = 5000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 5000;
 constexpr const char *WIFI_CREDENTIAL_PATH = "/wifi_config.json";
+constexpr bool RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT = false;  // Set false to force a clean config boot.
 constexpr const char *WIFI_CONFIG_AP_SSID = "CoopDoorSetup";
 constexpr uint32_t CONFIG_PORTAL_ANNOUNCE_INTERVAL_MS = 15000;
+const IPAddress CONFIG_PORTAL_IP(192, 168, 4, 1);
+const IPAddress CONFIG_PORTAL_NETMASK(255, 255, 255, 0);
+constexpr uint16_t CAPTIVE_PORTAL_DNS_PORT = 53;
 
 struct StoredCredential {
   String ssid;
@@ -60,6 +65,7 @@ bool connectToWifi();
 bool attemptWifiConnection(const char *ssid, const char *password);
 bool loadStoredCredential(StoredCredential &cred);
 bool saveStoredCredential(const String &ssid, const String &password);
+bool eraseStoredCredential();
 void configureConfigRoutes();
 void handleConfigRoot();
 void handleConfigSubmit();
@@ -67,6 +73,11 @@ void startConfigPortal();
 void announceConfigPortalStatus(bool force = false);
 void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 String escapeHtml(const String &value);
+void startCaptiveDns(const IPAddress &apIp);
+void stopCaptiveDns();
+void serviceCaptiveDns();
+bool handleCaptivePortalRedirect();
+bool hostMatchesPortalIp(const String &hostValue);
 
 //==============================================================================
 // Door control (ported from MicroPython open_door / close_door)
@@ -76,7 +87,7 @@ constexpr uint8_t RELAY_CLOSE_PIN = 5;  // Relay that drives the CLOSE direction
 constexpr uint32_t DOOR_TRAVEL_TIME_MS = 5000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
-constexpr bool TEST_MODE = false;  // When true, relays are not driven; logs only.
+constexpr bool TEST_MODE = true;  // When true, relays are not driven; logs only.
 constexpr bool SERIAL_HEARTBEAT_ENABLED = false;
 constexpr bool VERBOSE_LOGS = false;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
@@ -147,6 +158,8 @@ bool apiServerEnabled = false;
 bool configPortalActive = false;
 uint32_t lastConfigPortalAnnounceMs = 0;
 bool configPortalAnnouncementSent = false;
+DNSServer configPortalDns;
+bool configPortalDnsActive = false;
 
 Preferences doorPrefs;
 constexpr char PREF_NAMESPACE[] = "coopdoor";
@@ -543,6 +556,20 @@ bool saveStoredCredential(const String &ssid, const String &password) {
   const size_t written = serializeJson(doc, file);
   file.close();
   return written > 0;
+}
+
+bool eraseStoredCredential() {
+  if (!ensureFileSystem()) {
+    return false;
+  }
+  if (!LittleFS.exists(WIFI_CREDENTIAL_PATH)) {
+    return true;
+  }
+  if (!LittleFS.remove(WIFI_CREDENTIAL_PATH)) {
+    Serial.println("Failed to remove Wi-Fi credential file.");
+    return false;
+  }
+  return true;
 }
 
 void pushDoorHistoryEntry(const DoorHistoryEntry &entry) {
@@ -1125,11 +1152,19 @@ void handleNotFound() {
 }
 
 void handleConfigRoot() {
+  if (handleCaptivePortalRedirect()) {
+    return;
+  }
   StoredCredential stored;
   String storedSsid;
   if (loadStoredCredential(stored)) {
     storedSsid = stored.ssid;
   }
+  IPAddress portalIp = WiFi.softAPIP();
+  if (portalIp == IPAddress(0, 0, 0, 0)) {
+    portalIp = CONFIG_PORTAL_IP;
+  }
+  const String portalUrl = String(F("http://")) + portalIp.toString() + F("/");
   String page =
       F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' "
         "content='width=device-width,initial-scale=1'><title>Coop Door Setup</title>"
@@ -1157,6 +1192,10 @@ void handleConfigRoot() {
         "<input id='password' name='password' type='password' placeholder='Leave empty for open network'>"
         "<button type='submit'>Save &amp; Reboot</button></form>"
         "<p class='note'>After saving, the controller restarts and tries connecting with the new network.</p>"
+        "<p class='note'>Device hotspot address: <strong>");
+  page += escapeHtml(portalUrl);
+  page +=
+      F("</strong></p>"
         "</div><script>(function(){var ssidInput=document.getElementById('ssid');"
         "var options=document.getElementById('ssid-options');"
         "function renderNetworks(list){if(!Array.isArray(list)||!list.length){options.style.display='none';return;}"
@@ -1244,6 +1283,66 @@ void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   }
 }
 
+void startCaptiveDns(const IPAddress &apIp) {
+  stopCaptiveDns();
+  configPortalDnsActive = configPortalDns.start(CAPTIVE_PORTAL_DNS_PORT, "*", apIp);
+  if (!configPortalDnsActive) {
+    Serial.println("Failed to start captive portal DNS server.");
+  }
+}
+
+void stopCaptiveDns() {
+  if (!configPortalDnsActive) {
+    return;
+  }
+  configPortalDns.stop();
+  configPortalDnsActive = false;
+}
+
+void serviceCaptiveDns() {
+  if (configPortalDnsActive) {
+    configPortalDns.processNextRequest();
+  }
+}
+
+bool hostMatchesPortalIp(const String &hostValue) {
+  if (hostValue.isEmpty()) {
+    return false;
+  }
+  String sanitized = hostValue;
+  const int colonIndex = sanitized.indexOf(':');
+  if (colonIndex > 0) {
+    sanitized = sanitized.substring(0, colonIndex);
+  }
+  const IPAddress apIp = WiFi.softAPIP();
+  const String apIpStr = apIp.toString();
+  if (apIp == IPAddress(0, 0, 0, 0)) {
+    return false;
+  }
+  return sanitized.equalsIgnoreCase(apIpStr);
+}
+
+bool handleCaptivePortalRedirect() {
+  if (!configPortalActive) {
+    return false;
+  }
+  const String hostHeader = apiServer.hostHeader();
+  if (hostMatchesPortalIp(hostHeader)) {
+    return false;
+  }
+  const IPAddress apIp = WiFi.softAPIP();
+  if (apIp == IPAddress(0, 0, 0, 0)) {
+    return false;
+  }
+  const String redirectTarget = String(F("http://")) + apIp.toString() + F("/");
+  apiServer.sendHeader(F("Location"), redirectTarget, true);
+  apiServer.sendHeader(F("Cache-Control"), F("no-cache, no-store, must-revalidate"));
+  apiServer.sendHeader(F("Pragma"), F("no-cache"));
+  apiServer.sendHeader(F("Expires"), F("0"));
+  apiServer.send(302, F("text/plain"), F("Redirecting to configuration portal..."));
+  return true;
+}
+
 void configureConfigRoutes() {
   apiServer.on("/", HTTP_GET, handleConfigRoot);
   apiServer.on("/configure", HTTP_POST, handleConfigSubmit);
@@ -1278,9 +1377,8 @@ void startConfigPortal() {
   if (!WiFi.softAP(WIFI_CONFIG_AP_SSID)) {
     Serial.println("Failed to start Wi-Fi config AP.");
   }
-  IPAddress apIp(192, 168, 4, 1);
-  IPAddress netmask(255, 255, 255, 0);
-  WiFi.softAPConfig(apIp, apIp, netmask);
+  WiFi.softAPConfig(CONFIG_PORTAL_IP, CONFIG_PORTAL_IP, CONFIG_PORTAL_NETMASK);
+  startCaptiveDns(CONFIG_PORTAL_IP);
   announceConfigPortalStatus(true);
   configureConfigRoutes();
   apiServer.begin();
@@ -1325,6 +1423,14 @@ void setup() {
 
   initDoorHardware();
   ensureFileSystem();
+  if (!RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT) {
+    if (eraseStoredCredential()) {
+      Serial.println("Stored Wi-Fi credentials cleared (RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT=false).");
+    } else {
+      Serial.println(
+          "Requested Wi-Fi credential wipe failed; continuing with whatever is stored on disk.");
+    }
+  }
   loadDoorHistoryFromDisk();
   logSensorReadings();
   const DoorState bootState = getDoorPosition();
@@ -1362,6 +1468,7 @@ void loop() {
   if (apiServerEnabled) {
     apiServer.handleClient();
   }
+  serviceCaptiveDns();
   delay(10);
 }
 
@@ -1493,12 +1600,14 @@ bool connectToWifi() {
   }
 
   bool connected = false;
-  StoredCredential stored;
-  if (loadStoredCredential(stored)) {
-    Serial.printf("Attempting stored Wi-Fi credential for SSID '%s'.\n", stored.ssid.c_str());
-    connected = attemptWifiConnection(stored.ssid.c_str(), stored.password.c_str());
-    if (!connected) {
-      Serial.println("Stored credential failed.");
+  if (RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT) {
+    StoredCredential stored;
+    if (loadStoredCredential(stored)) {
+      Serial.printf("Attempting stored Wi-Fi credential for SSID '%s'.\n", stored.ssid.c_str());
+      connected = attemptWifiConnection(stored.ssid.c_str(), stored.password.c_str());
+      if (!connected) {
+        Serial.println("Stored credential failed.");
+      }
     }
   }
 
