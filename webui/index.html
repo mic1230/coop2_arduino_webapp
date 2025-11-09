@@ -13,9 +13,36 @@
         <div>
           <h1>Coop Door</h1>
           <p class="subtle" data-last-updated>Waiting for controller&hellip;</p>
+          <p class="subtle small" data-device-target>Device target: this site</p>
         </div>
-        <button type="button" class="ghost" id="refresh-btn">Refresh</button>
+        <div class="header-actions">
+          <button type="button" class="ghost" id="refresh-btn">Refresh</button>
+          <button type="button" class="ghost" id="device-target-btn">Change device</button>
+        </div>
       </header>
+
+      <section class="device-panel" data-device-panel hidden>
+        <form class="device-form" data-device-form>
+          <label for="device-target-input">Controller address</label>
+          <input
+            id="device-target-input"
+            type="text"
+            placeholder="http://192.168.4.1 or /proxy-path"
+            autocomplete="off"
+            spellcheck="false"
+            data-device-input
+          />
+          <p class="subtle small">
+            Enter the ESP32 IP/hostname (e.g. 192.168.0.10, http://coop-door.local) or a proxy path
+            such as /controller. Leave empty to talk to this site.
+          </p>
+          <div class="device-form-actions">
+            <button type="submit" class="action-button small">Use address</button>
+            <button type="button" class="ghost small" data-device-reset>Reset</button>
+          </div>
+          <p class="device-form-message subtle small" data-device-message hidden></p>
+        </form>
+      </section>
 
       <div class="tab-bar" role="tablist">
         <button type="button" class="tab-button active" data-tab-btn="dashboard" role="tab" aria-selected="true">

@@ -1,14 +1,99 @@
-const STATUS_ENDPOINT = '/api/status';
-const COMMAND_ENDPOINT = (action) => `/api/door/${action}`;
+const API_BASE_STORAGE_KEY = 'coop:api-base';
+const API_QUERY_PARAM_KEYS = ['device', 'controller', 'host', 'api'];
 const POLL_INTERVAL_MS = 5000;
 const COUNTDOWN_TICK_MS = 250;
 const DEFAULT_DOOR_TRAVEL_TIME_MS = 50000;
 const DEFAULT_POMODORO_LENGTH_MS = DEFAULT_DOOR_TRAVEL_TIME_MS;
-const HISTORY_ENDPOINT = '/api/history';
 const HISTORY_POLL_INTERVAL_MS = 15000;
 const HISTORY_DISPLAY_LIMIT = 30;
-const WIFI_CONFIG_ENDPOINT = '/api/wifi/config';
-const WIFI_SCAN_ENDPOINT = '/api/wifi/scan';
+
+function getPageOrigin() {
+  if (window.location.origin && window.location.origin !== 'null') {
+    return window.location.origin;
+  }
+  const host = window.location.host ? `//${window.location.host}` : '//';
+  return `${window.location.protocol}${host}`;
+}
+
+function sanitizeApiBase(value) {
+  if (!value) {
+    return '';
+  }
+  let input = value.trim();
+  if (!input || input === '/' || input === '.') {
+    return '';
+  }
+  if (input.startsWith('/')) {
+    return input.replace(/\/+$/, '');
+  }
+  if (input.startsWith('//')) {
+    return `${window.location.protocol}${input}`.replace(/\/+$/, '');
+  }
+  let normalized = input;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(normalized)) {
+    normalized = `http://${normalized}`;
+  }
+  try {
+    const url = new URL(normalized);
+    if (url.pathname === '/api' && !url.search && !url.hash) {
+      url.pathname = '/';
+    }
+    url.hash = '';
+    url.search = '';
+    let result = url.toString();
+    if (result.endsWith('/')) {
+      result = result.slice(0, -1);
+    }
+    return result;
+  } catch (error) {
+    console.error('Invalid API base provided:', error);
+    return '';
+  }
+}
+
+function readStoredApiBase() {
+  try {
+    return sanitizeApiBase(window.localStorage?.getItem(API_BASE_STORAGE_KEY) ?? '');
+  } catch {
+    return '';
+  }
+}
+
+function persistApiBase(value) {
+  try {
+    if (value) {
+      window.localStorage?.setItem(API_BASE_STORAGE_KEY, value);
+    } else {
+      window.localStorage?.removeItem(API_BASE_STORAGE_KEY);
+    }
+  } catch {
+    // Storage might be unavailable (private browsing, etc.)
+  }
+}
+
+function getQueryApiBase() {
+  try {
+    const params = new URLSearchParams(window.location.search ?? '');
+    for (const key of API_QUERY_PARAM_KEYS) {
+      const candidate = params.get(key);
+      if (candidate) {
+        return sanitizeApiBase(candidate);
+      }
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return '';
+}
+
+const initialApiBase = (() => {
+  const fromQuery = getQueryApiBase();
+  if (fromQuery) {
+    persistApiBase(fromQuery);
+    return fromQuery;
+  }
+  return readStoredApiBase();
+})();
 
 const state = {
   status: null,
@@ -36,7 +121,11 @@ const state = {
   wifiFormDirty: false,
   wifiScanResults: [],
   wifiScanLoading: false,
-  wifiScanRequested: false
+  wifiScanRequested: false,
+  apiBase: initialApiBase,
+  devicePanelOpen: false,
+  devicePanelMessage: '',
+  devicePanelMessageType: ''
 };
 
 let countdownTimerId = null;
@@ -46,7 +135,14 @@ let historyPollTimer = null;
 
 const elements = {
   lastUpdated: document.querySelector('[data-last-updated]'),
+  deviceTarget: document.querySelector('[data-device-target]'),
   refreshButton: document.getElementById('refresh-btn'),
+  deviceTargetButton: document.getElementById('device-target-btn'),
+  devicePanel: document.querySelector('[data-device-panel]'),
+  devicePanelForm: document.querySelector('[data-device-form]'),
+  devicePanelInput: document.querySelector('[data-device-input]'),
+  devicePanelMessage: document.querySelector('[data-device-message]'),
+  deviceResetButton: document.querySelector('[data-device-reset]'),
   loadingSection: document.querySelector('[data-loading]'),
   cardsSection: document.querySelector('[data-cards]'),
   statusHint: document.querySelector('[data-status-hint]'),
@@ -106,6 +202,127 @@ function doorTargetState() {
 
 function doorBusy() {
   return Boolean(state.status?.door?.busy);
+}
+
+function buildEndpoint(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const base = state.apiBase;
+  if (!base) {
+    return normalizedPath;
+  }
+  const trimmedBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  return `${trimmedBase}${normalizedPath}`;
+}
+
+function formatDeviceTargetLabel() {
+  const origin = getPageOrigin();
+  const normalizedOrigin = origin.endsWith('/') ? origin.slice(0, -1) : origin;
+  if (!state.apiBase) {
+    return `Device target: ${normalizedOrigin}`;
+  }
+  if (/^https?:\/\//i.test(state.apiBase)) {
+    return `Device target: ${state.apiBase}`;
+  }
+  return `Device target: ${normalizedOrigin}${state.apiBase}`;
+}
+
+function applyApiBaseChange(nextBase, options = {}) {
+  const sanitized = sanitizeApiBase(nextBase);
+  if (sanitized === state.apiBase) {
+    return;
+  }
+  if (!options.skipPersist) {
+    persistApiBase(sanitized);
+  }
+  const resettingWifiState = state.activeTab === 'settings';
+  setState({
+    apiBase: sanitized,
+    status: null,
+    lastUpdated: null,
+    initialized: false,
+    errorMessage: '',
+    doorHistory: [],
+    historyError: '',
+    wifiMessage: '',
+    wifiMessageType: ''
+  });
+  fetchStatus(true);
+  fetchDoorHistory();
+  if (resettingWifiState) {
+    setState({
+      wifiConfig: null,
+      wifiConfigLoading: false,
+      wifiForm: {
+        ssid: '',
+        password: '',
+        retainCredentials: true
+      },
+      wifiFormDirty: false,
+      wifiScanResults: [],
+      wifiScanRequested: false
+    });
+    fetchWifiConfig();
+  }
+}
+
+function clearDevicePanelMessage() {
+  if (!state.devicePanelMessage && !state.devicePanelMessageType) {
+    return;
+  }
+  setState({ devicePanelMessage: '', devicePanelMessageType: '' });
+}
+
+function toggleDevicePanel(forceOpen) {
+  const nextOpen = typeof forceOpen === 'boolean' ? forceOpen : !state.devicePanelOpen;
+  if (nextOpen === state.devicePanelOpen) {
+    if (nextOpen) {
+      requestAnimationFrame(() => {
+        elements.devicePanelInput?.focus();
+        elements.devicePanelInput?.select();
+      });
+    }
+    return;
+  }
+  setState({
+    devicePanelOpen: nextOpen,
+    devicePanelMessage: '',
+    devicePanelMessageType: ''
+  });
+  if (nextOpen) {
+    requestAnimationFrame(() => {
+      elements.devicePanelInput?.focus();
+      elements.devicePanelInput?.select();
+    });
+  }
+}
+
+function handleDeviceTargetClick() {
+  toggleDevicePanel();
+}
+
+function handleDeviceFormSubmit(event) {
+  event.preventDefault();
+  const value = (elements.devicePanelInput?.value ?? '').trim();
+  if (!value) {
+    applyApiBaseChange('');
+    toggleDevicePanel(false);
+    return;
+  }
+  const sanitized = sanitizeApiBase(value);
+  if (!sanitized) {
+    setState({
+      devicePanelMessage: 'Enter a valid http(s) URL, hostname, or /path value.',
+      devicePanelMessageType: 'error'
+    });
+    return;
+  }
+  applyApiBaseChange(sanitized);
+  toggleDevicePanel(false);
+}
+
+function handleDeviceResetClick() {
+  applyApiBaseChange('');
+  toggleDevicePanel(false);
 }
 
 function isActionActive(action) {
@@ -178,6 +395,27 @@ function render() {
     elements.lastUpdated.textContent = state.lastUpdated
       ? `Last updated ${state.lastUpdated.toLocaleTimeString()}`
       : 'Waiting for controller...';
+  }
+  if (elements.deviceTarget) {
+    elements.deviceTarget.textContent = formatDeviceTargetLabel();
+  }
+  if (elements.devicePanel) {
+    elements.devicePanel.hidden = !state.devicePanelOpen;
+  }
+  if (elements.devicePanelInput) {
+    const nextValue = state.apiBase ?? '';
+    if (elements.devicePanelInput.value !== nextValue) {
+      elements.devicePanelInput.value = nextValue;
+    }
+  }
+  if (elements.devicePanelMessage) {
+    const hasMessage = Boolean(state.devicePanelMessage);
+    elements.devicePanelMessage.hidden = !hasMessage;
+    if (hasMessage) {
+      elements.devicePanelMessage.textContent = state.devicePanelMessage;
+      const type = state.devicePanelMessageType || 'error';
+      elements.devicePanelMessage.className = `device-form-message subtle small ${type}`;
+    }
   }
   if (elements.refreshButton) {
     elements.refreshButton.disabled = loading || state.manualReloading;
@@ -483,7 +721,7 @@ function formatCountdown(ms) {
 async function fetchDoorHistory() {
   const requestId = ++latestHistoryRequestId;
   try {
-    const response = await fetch(HISTORY_ENDPOINT, { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/history'), { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`History request failed with HTTP ${response.status}`);
     }
@@ -508,7 +746,7 @@ async function fetchDoorHistory() {
 function downloadHistoryCsv() {
   const timestamp = new Date().toISOString().replace(/[:]/g, '-').split('.')[0];
   const link = document.createElement('a');
-  link.href = '/history.csv';
+  link.href = buildEndpoint('/history.csv');
   link.download = `door-history-${timestamp}.csv`;
   document.body.appendChild(link);
   link.click();
@@ -535,7 +773,7 @@ async function fetchWifiConfig() {
   }
   setState({ wifiConfigLoading: true, wifiMessage: '', wifiMessageType: '' });
   try {
-    const response = await fetch(WIFI_CONFIG_ENDPOINT, { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/wifi/config'), { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`Settings request failed with HTTP ${response.status}`);
     }
@@ -608,7 +846,7 @@ async function handleWifiFormSubmit(event) {
   }
   setState({ wifiSaving: true, wifiMessage: '', wifiMessageType: '' });
   try {
-    const response = await fetch(WIFI_CONFIG_ENDPOINT, {
+    const response = await fetch(buildEndpoint('/api/wifi/config'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -656,7 +894,7 @@ async function fetchWifiScan() {
   }
   setState({ wifiScanLoading: true, wifiScanRequested: true, wifiMessage: '', wifiMessageType: '' });
   try {
-    const response = await fetch(WIFI_SCAN_ENDPOINT, { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/wifi/scan'), { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`Scan failed with HTTP ${response.status}`);
     }
@@ -790,7 +1028,7 @@ async function fetchStatus(initial = false) {
   }
   setState({ errorMessage: '' });
   try {
-    const response = await fetch(STATUS_ENDPOINT, { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/status'), { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`Status request failed with HTTP ${response.status}`);
     }
@@ -817,7 +1055,7 @@ async function sendDoorCommand(action) {
   }
   setState({ commandInFlight: action, errorMessage: '' });
   try {
-    const response = await fetch(COMMAND_ENDPOINT(action), {
+    const response = await fetch(buildEndpoint(`/api/door/${action}`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       cache: 'no-store'
@@ -850,6 +1088,18 @@ historyPollTimer = setInterval(fetchDoorHistory, HISTORY_POLL_INTERVAL_MS);
 
 if (elements.refreshButton) {
   elements.refreshButton.addEventListener('click', manualRefresh);
+}
+if (elements.deviceTargetButton) {
+  elements.deviceTargetButton.addEventListener('click', handleDeviceTargetClick);
+}
+if (elements.devicePanelForm) {
+  elements.devicePanelForm.addEventListener('submit', handleDeviceFormSubmit);
+}
+if (elements.deviceResetButton) {
+  elements.deviceResetButton.addEventListener('click', handleDeviceResetClick);
+}
+if (elements.devicePanelInput) {
+  elements.devicePanelInput.addEventListener('input', clearDevicePanelMessage);
 }
 if (elements.openButton) {
   elements.openButton.addEventListener('click', () => sendDoorCommand('open'));
