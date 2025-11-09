@@ -17,119 +17,180 @@
         <button type="button" class="ghost" id="refresh-btn">Refresh</button>
       </header>
 
-      <section class="loading-panel" data-loading>
-        <div class="spinner" aria-hidden="true"></div>
-        <p>Connecting to the coop controller...</p>
-      </section>
-
-      <div class="banner info status-hint" data-status-hint hidden role="status">
-        Syncing with controller...
+      <div class="tab-bar" role="tablist">
+        <button type="button" class="tab-button active" data-tab-btn="dashboard" role="tab" aria-selected="true">
+          Overview
+        </button>
+        <button type="button" class="tab-button" data-tab-btn="settings" role="tab" aria-selected="false">
+          Settings
+        </button>
       </div>
 
-      <div class="banner error" data-error hidden role="status"></div>
+      <section data-dashboard-panel>
+        <section class="loading-panel" data-loading>
+          <div class="spinner" aria-hidden="true"></div>
+          <p>Connecting to the coop controller...</p>
+        </section>
 
-      <section class="cards" data-cards hidden>
-        <article class="card door-card">
-          <div class="card-header">
-            <h2>Door status</h2>
-            <span class="status-chip" data-door-chip>unknown</span>
-          </div>
-          <dl class="key-values single">
-            <div>
-              <dt>Current time</dt>
-              <dd data-current-time>--</dd>
+        <div class="banner info status-hint" data-status-hint hidden role="status">
+          Syncing with controller...
+        </div>
+
+        <div class="banner error" data-error hidden role="status"></div>
+
+        <section class="cards" data-cards hidden>
+          <article class="card door-card">
+            <div class="card-header">
+              <h2>Door status</h2>
+              <span class="status-chip" data-door-chip>unknown</span>
             </div>
-          </dl>
-          <div class="countdown" data-countdown hidden>
-            <div class="countdown-header">
-              <span class="label">Countdown</span>
-              <strong data-countdown-value>--</strong>
-            </div>
-            <div class="countdown-bar" data-countdown-bar hidden>
-              <div class="fill" data-countdown-fill style="width: 0%"></div>
-            </div>
-            <small class="subtle" data-countdown-meta>Targeting --</small>
-          </div>
-          <p class="chip warning" data-test-mode hidden>
-            Test mode is enabled &mdash; relays are not energized.
-          </p>
-          <div class="actions">
-            <button type="button" class="action-button" data-open-btn>Open door</button>
-            <button type="button" class="action-button" data-close-btn>Close door</button>
-          </div>
-          <div class="door-history">
-            <div class="door-history-header">
+            <dl class="key-values single">
               <div>
-                <h3>Door history</h3>
-                <p class="subtle">Last door changes and hourly snapshots</p>
+                <dt>Current time</dt>
+                <dd data-current-time>--</dd>
               </div>
-              <button type="button" class="ghost small" data-download-history>
-                Download CSV
-              </button>
+            </dl>
+            <div class="countdown" data-countdown hidden>
+              <div class="countdown-header">
+                <span class="label">Countdown</span>
+                <strong data-countdown-value>--</strong>
+              </div>
+              <div class="countdown-bar" data-countdown-bar hidden>
+                <div class="fill" data-countdown-fill style="width: 0%"></div>
+              </div>
+              <small class="subtle" data-countdown-meta>Targeting --</small>
             </div>
-            <div class="door-history-table-wrapper">
-              <table class="door-history-table" aria-label="Door history">
-                <thead>
-                  <tr>
-                    <th scope="col">Timestamp</th>
-                    <th scope="col">Door</th>
-                    <th scope="col">Battery temp</th>
-                    <th scope="col">Greenhouse temp</th>
-                    <th scope="col">Battery voltage</th>
-                    <th scope="col">Event</th>
-                  </tr>
-                </thead>
-                <tbody data-door-history-body>
-                  <tr>
-                    <td colspan="6" class="empty-history">
-                      History will appear once data is available.
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <p class="chip warning" data-test-mode hidden>
+              Test mode is enabled &mdash; relays are not energized.
+            </p>
+            <div class="actions">
+              <button type="button" class="action-button" data-open-btn>Open door</button>
+              <button type="button" class="action-button" data-close-btn>Close door</button>
             </div>
-          </div>
-        </article>
+            <div class="door-history">
+              <div class="door-history-header">
+                <div>
+                  <h3>Door history</h3>
+                  <p class="subtle">Last door changes and hourly snapshots</p>
+                </div>
+                <button type="button" class="ghost small" data-download-history>
+                  Download CSV
+                </button>
+              </div>
+              <div class="door-history-table-wrapper">
+                <table class="door-history-table" aria-label="Door history">
+                  <thead>
+                    <tr>
+                      <th scope="col">Timestamp</th>
+                      <th scope="col">Door</th>
+                      <th scope="col">Battery temp</th>
+                      <th scope="col">Greenhouse temp</th>
+                      <th scope="col">Battery voltage</th>
+                      <th scope="col">Event</th>
+                    </tr>
+                  </thead>
+                  <tbody data-door-history-body>
+                    <tr>
+                      <td colspan="6" class="empty-history">
+                        History will appear once data is available.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </article>
 
-        <article class="card sensor-card">
-          <div class="card-header">
-            <h2>Sensors</h2>
-          </div>
-          <div class="sensor-grid">
-            <div>
-              <span class="label">Battery temp</span>
-              <strong data-battery-temp>--</strong>
+          <article class="card sensor-card">
+            <div class="card-header">
+              <h2>Sensors</h2>
             </div>
-            <div>
-              <span class="label">Greenhouse temp</span>
-              <strong data-greenhouse-temp>--</strong>
+            <div class="sensor-grid">
+              <div>
+                <span class="label">Battery temp</span>
+                <strong data-battery-temp>--</strong>
+              </div>
+              <div>
+                <span class="label">Greenhouse temp</span>
+                <strong data-greenhouse-temp>--</strong>
+              </div>
+              <div>
+                <span class="label">Battery voltage</span>
+                <strong data-battery-voltage>--</strong>
+              </div>
             </div>
-            <div>
-              <span class="label">Battery voltage</span>
-              <strong data-battery-voltage>--</strong>
-            </div>
-          </div>
-        </article>
+          </article>
 
-        <article class="card wifi-card">
+          <article class="card wifi-card">
+            <div class="card-header">
+              <h2>Wi-Fi</h2>
+            </div>
+            <dl class="key-values" data-wifi-values>
+              <div>
+                <dt>SSID</dt>
+                <dd data-wifi-ssid>--</dd>
+              </div>
+              <div>
+                <dt>IP address</dt>
+                <dd data-wifi-ip>--</dd>
+              </div>
+              <div>
+                <dt>Signal</dt>
+                <dd data-wifi-signal>--</dd>
+              </div>
+            </dl>
+            <p class="subtle" data-wifi-empty hidden>Not connected.</p>
+          </article>
+        </section>
+      </section>
+
+      <section class="settings-panel" data-settings-panel hidden>
+        <article class="card settings-card">
           <div class="card-header">
-            <h2>Wi-Fi</h2>
+            <div>
+              <h2>Wi-Fi settings</h2>
+              <p class="subtle">Configure how the controller connects to your network.</p>
+            </div>
+            <span class="chip info" data-wifi-ap-badge hidden>Access point mode</span>
           </div>
-          <dl class="key-values" data-wifi-values>
-            <div>
-              <dt>SSID</dt>
-              <dd data-wifi-ssid>--</dd>
+          <div class="banner info" data-wifi-message hidden></div>
+          <form class="settings-form" data-wifi-form>
+            <label for="wifi-ssid-input">Wi-Fi SSID</label>
+            <input
+              id="wifi-ssid-input"
+              name="wifi-ssid"
+              type="text"
+              placeholder="Network name"
+              autocomplete="off"
+              data-wifi-ssid-input
+            />
+            <div class="scan-row">
+              <button type="button" class="ghost small" data-wifi-scan>Scan networks</button>
+              <span class="subtle small">Tap a result to fill the SSID.</span>
             </div>
-            <div>
-              <dt>IP address</dt>
-              <dd data-wifi-ip>--</dd>
+            <div class="scan-results" data-wifi-scan-results></div>
+            <label for="wifi-password-input">Password</label>
+            <input
+              id="wifi-password-input"
+              name="wifi-password"
+              type="password"
+              placeholder="Leave empty for open network"
+              data-wifi-password-input
+            />
+            <label for="wifi-retain-select">RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT</label>
+            <select id="wifi-retain-select" data-wifi-retain-select>
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+            <p class="subtle small">
+              When set to "No", the controller forgets saved Wi-Fi credentials every time it restarts.
+            </p>
+            <div class="settings-actions">
+              <button type="submit" class="action-button" data-wifi-submit>Save settings</button>
             </div>
-            <div>
-              <dt>Signal</dt>
-              <dd data-wifi-signal>--</dd>
-            </div>
-          </dl>
-          <p class="subtle" data-wifi-empty hidden>Not connected.</p>
+          </form>
+          <p class="subtle small" data-wifi-ap-hint hidden></p>
+          <p class="subtle small" data-wifi-config-meta></p>
         </article>
       </section>
     </main>

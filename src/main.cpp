@@ -46,7 +46,8 @@ constexpr uint32_t INTERNET_CHECK_TIMEOUT_MS = 5000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 5000;
 constexpr const char *WIFI_CREDENTIAL_PATH = "/wifi_config.json";
-constexpr bool RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT = false;  // Set false to force a clean config boot.
+constexpr bool DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT = true;
+bool retainWifiCredentialsAfterReboot = DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT;
 constexpr const char *WIFI_CONFIG_AP_SSID = "CoopDoorSetup";
 constexpr uint32_t CONFIG_PORTAL_ANNOUNCE_INTERVAL_MS = 15000;
 const IPAddress CONFIG_PORTAL_IP(192, 168, 4, 1);
@@ -66,18 +67,19 @@ bool attemptWifiConnection(const char *ssid, const char *password);
 bool loadStoredCredential(StoredCredential &cred);
 bool saveStoredCredential(const String &ssid, const String &password);
 bool eraseStoredCredential();
-void configureConfigRoutes();
-void handleConfigRoot();
-void handleConfigSubmit();
 void startConfigPortal();
 void announceConfigPortalStatus(bool force = false);
 void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
-String escapeHtml(const String &value);
 void startCaptiveDns(const IPAddress &apIp);
 void stopCaptiveDns();
 void serviceCaptiveDns();
 bool handleCaptivePortalRedirect();
 bool hostMatchesPortalIp(const String &hostValue);
+void handleScanWifi();
+void handleWifiConfigStatus();
+void handleWifiConfigUpdate();
+bool initWifiPreferences();
+void persistRetainWifiPreference(bool retain);
 
 //==============================================================================
 // Door control (ported from MicroPython open_door / close_door)
@@ -164,6 +166,35 @@ bool configPortalDnsActive = false;
 Preferences doorPrefs;
 constexpr char PREF_NAMESPACE[] = "coopdoor";
 constexpr char PREF_KEY_STATE[] = "state";
+
+Preferences wifiPrefs;
+constexpr char WIFI_PREF_NAMESPACE[] = "wifi";
+constexpr char WIFI_PREF_KEY_RETAIN[] = "retain";
+
+bool initWifiPreferences() {
+  static bool initialized = false;
+  if (initialized) {
+    return true;
+  }
+  initialized = wifiPrefs.begin(WIFI_PREF_NAMESPACE, false);
+  if (!initialized) {
+    Serial.println("Failed to open Wi-Fi preferences; using default retain setting.");
+    retainWifiCredentialsAfterReboot = DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT;
+    return false;
+  }
+  retainWifiCredentialsAfterReboot =
+      wifiPrefs.getBool(WIFI_PREF_KEY_RETAIN, DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT);
+  return true;
+}
+
+void persistRetainWifiPreference(bool retain) {
+  retainWifiCredentialsAfterReboot = retain;
+  if (!initWifiPreferences()) {
+    Serial.println("Unable to persist Wi-Fi retain preference (prefs unavailable).");
+    return;
+  }
+  wifiPrefs.putBool(WIFI_PREF_KEY_RETAIN, retain);
+}
 
 enum class DoorState : uint8_t { Closed, Opened };
 
@@ -1091,35 +1122,6 @@ void handleDoorClose() {
   sendJsonResponse(200, doorCommandResponseToJson(F("close"), result));
 }
 
-String escapeHtml(const String &value) {
-  String escaped;
-  escaped.reserve(value.length());
-  for (size_t idx = 0; idx < static_cast<size_t>(value.length()); ++idx) {
-    const char ch = value.charAt(idx);
-    switch (ch) {
-      case '&':
-        escaped += F("&amp;");
-        break;
-      case '<':
-        escaped += F("&lt;");
-        break;
-      case '>':
-        escaped += F("&gt;");
-        break;
-      case '"':
-        escaped += F("&quot;");
-        break;
-      case '\'':
-        escaped += F("&#39;");
-        break;
-      default:
-        escaped += ch;
-        break;
-    }
-  }
-  return escaped;
-}
-
 void handleStatusEndpoint() {
   const DoorState state = getDoorPosition();
   const SensorReadings readings = getSensorReadings();
@@ -1136,8 +1138,7 @@ void handleStatusEndpoint() {
 }
 
 void handleNotFound() {
-  if (configPortalActive) {
-    handleConfigRoot();
+  if (configPortalActive && handleCaptivePortalRedirect()) {
     return;
   }
   if (serveEmbeddedAsset(apiServer, apiServer.uri())) {
@@ -1151,90 +1152,110 @@ void handleNotFound() {
   sendJsonResponse(404, json);
 }
 
-void handleConfigRoot() {
-  if (handleCaptivePortalRedirect()) {
-    return;
+void handleScanWifi() {
+  StaticJsonDocument<1024> doc;
+  JsonArray arr = doc.to<JsonArray>();
+  const int16_t found = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
+  if (found > 0) {
+    for (int16_t idx = 0; idx < found; ++idx) {
+      JsonObject item = arr.add<JsonObject>();
+      item["ssid"] = WiFi.SSID(idx);
+      item["rssi"] = WiFi.RSSI(idx);
+    }
   }
+  String payload;
+  serializeJson(doc, payload);
+  sendJsonResponse(200, payload);
+}
+
+void handleWifiConfigStatus() {
+  initWifiPreferences();
   StoredCredential stored;
-  String storedSsid;
-  if (loadStoredCredential(stored)) {
-    storedSsid = stored.ssid;
+  const bool hasStored = loadStoredCredential(stored);
+  StaticJsonDocument<256> doc;
+  doc["retainCredentials"] = retainWifiCredentialsAfterReboot;
+  doc["configPortalActive"] = configPortalActive;
+  doc["configSsid"] = WIFI_CONFIG_AP_SSID;
+  doc["hasStored"] = hasStored;
+  doc["storedSsid"] = hasStored ? stored.ssid : "";
+  if (configPortalActive) {
+    IPAddress apIp = WiFi.softAPIP();
+    if (apIp != IPAddress(0, 0, 0, 0)) {
+      doc["apIp"] = apIp.toString();
+    } else {
+      doc["apIp"] = CONFIG_PORTAL_IP.toString();
+    }
   }
-  IPAddress portalIp = WiFi.softAPIP();
-  if (portalIp == IPAddress(0, 0, 0, 0)) {
-    portalIp = CONFIG_PORTAL_IP;
-  }
-  const String portalUrl = String(F("http://")) + portalIp.toString() + F("/");
-  String page =
-      F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' "
-        "content='width=device-width,initial-scale=1'><title>Coop Door Setup</title>"
-        "<style>body{font-family:sans-serif;background:#f5f5f7;margin:0;padding:1.5rem;}"
-        ".card{max-width:420px;margin:0 auto;background:#fff;border-radius:12px;padding:1.5rem;"
-        "box-shadow:0 12px 25px rgba(15,23,42,0.15);}h1{margin-top:0;font-size:1.4rem;}"
-        "label{display:block;margin-top:1rem;font-size:0.9rem;color:#334155;}"
-        "input,select{width:100%;padding:0.65rem;border:1px solid #d0d5dd;border-radius:8px;font-size:1rem;}"
-        "button{margin-top:1.25rem;width:100%;padding:0.9rem;border:none;border-radius:8px;"
-        "background:#2563eb;color:#fff;font-size:1rem;font-weight:600;cursor:pointer;}"
-        "button:hover{background:#1d4fd8;}p.note{margin-top:1rem;font-size:0.85rem;color:#475569;}"
-        ".ssid-options{margin-top:0.5rem;max-height:180px;overflow-y:auto;border:1px solid #d0d5dd;"
-        "border-radius:8px;padding:0.35rem;display:none;} .ssid-options button{margin:2px 0;padding:0.4rem;"
-        "width:100%;border:1px solid #94a3b8;border-radius:6px;background:#f8fafc;color:#0f172a;font-weight:500;}"
-        ".ssid-options button:hover{background:#dbeafe;}"
-        "</style></head><body><div class='card'><h1>Configure Wi-Fi</h1>"
-        "<form method='POST' action='/configure'>"
-        "<label for='ssid'>Wi-Fi SSID</label>"
-        "<input id='ssid' name='ssid' required value='");
-  page += escapeHtml(storedSsid);
-  page +=
-      F("' autocomplete='off'>"
-        "<div class='ssid-options' id='ssid-options'></div>"
-        "<label for='password'>Password</label>"
-        "<input id='password' name='password' type='password' placeholder='Leave empty for open network'>"
-        "<button type='submit'>Save &amp; Reboot</button></form>"
-        "<p class='note'>After saving, the controller restarts and tries connecting with the new network.</p>"
-        "<p class='note'>Device hotspot address: <strong>");
-  page += escapeHtml(portalUrl);
-  page +=
-      F("</strong></p>"
-        "</div><script>(function(){var ssidInput=document.getElementById('ssid');"
-        "var options=document.getElementById('ssid-options');"
-        "function renderNetworks(list){if(!Array.isArray(list)||!list.length){options.style.display='none';return;}"
-        "options.innerHTML='';list.forEach(function(net){var btn=document.createElement('button');"
-        "btn.type='button';btn.textContent=net.ssid+(net.rssi?' ('+net.rssi+' dBm)':'');"
-        "btn.addEventListener('click',function(){ssidInput.value=net.ssid;options.style.display='none';});"
-        "options.appendChild(btn);});options.style.display='block';}"
-        "async function fetchNetworks(){options.innerHTML='Scanning...';options.style.display='block';"
-        "try{var response=await fetch('/scan');if(!response.ok)throw new Error('scan failed');"
-        "var payload=await response.json();renderNetworks(payload);}catch(error){options.innerHTML='Scan failed';}}"
-        "ssidInput.addEventListener('focus',function(){fetchNetworks();});})();</script>"
-        "</body></html>");
-  apiServer.send(200, F("text/html"), page);
+  String payload;
+  serializeJson(doc, payload);
+  sendJsonResponse(200, payload);
 }
 
-void handleConfigSubmit() {
-  if (!apiServer.hasArg("ssid")) {
-    apiServer.send(400, F("text/plain"), F("Missing ssid"));
+void handleWifiConfigUpdate() {
+  initWifiPreferences();
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
     return;
   }
-  String ssid = apiServer.arg("ssid");
-  String password = apiServer.arg("password");
-  ssid.trim();
-  password.trim();
-  if (ssid.isEmpty()) {
-    apiServer.send(400, F("text/plain"), F("SSID required"));
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
     return;
   }
-  if (!saveStoredCredential(ssid, password)) {
-    apiServer.send(500, F("text/plain"), F("Failed to store credentials"));
+  StaticJsonDocument<512> doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
     return;
   }
-  apiServer.send(200, F("text/html"),
-                 F("<html><body><h2>Credentials saved.</h2><p>Rebooting...</p></body></html>"));
-  delay(500);
-  ESP.restart();
+  const bool hasRetainField = doc.containsKey("retainCredentials");
+  const bool hasSsidField = doc.containsKey("ssid");
+  if (!hasRetainField && !hasSsidField) {
+    sendJsonResponse(400, F("{\"error\":\"no_changes\"}"));
+    return;
+  }
+  if (hasRetainField) {
+    const bool retainRequested = doc["retainCredentials"].as<bool>();
+    persistRetainWifiPreference(retainRequested);
+  }
+  bool savedCredentials = false;
+  if (hasSsidField) {
+    const char *ssidValue = doc["ssid"] | "";
+    const char *passwordValue = doc["password"] | "";
+    String ssid = String(ssidValue);
+    String password = String(passwordValue);
+    ssid.trim();
+    password.trim();
+    if (ssid.isEmpty()) {
+      sendJsonResponse(400, F("{\"error\":\"ssid_required\"}"));
+      return;
+    }
+    if (!saveStoredCredential(ssid, password)) {
+      sendJsonResponse(500, F("{\"error\":\"save_failed\"}"));
+      return;
+    }
+    savedCredentials = true;
+  }
+  StaticJsonDocument<256> response;
+  response["retainCredentials"] = retainWifiCredentialsAfterReboot;
+  response["savedCredentials"] = savedCredentials;
+  response["rebooting"] = savedCredentials;
+  response["configPortalActive"] = configPortalActive;
+  response["configSsid"] = WIFI_CONFIG_AP_SSID;
+  if (configPortalActive) {
+    const IPAddress apIp = WiFi.softAPIP();
+    if (apIp != IPAddress(0, 0, 0, 0)) {
+      response["apIp"] = apIp.toString();
+    }
+  }
+  String payload;
+  serializeJson(response, payload);
+  sendJsonResponse(200, payload);
+  if (savedCredentials) {
+    delay(500);
+    ESP.restart();
+  }
 }
-
-void handleScanWifi();
 
 void announceConfigPortalStatus(bool force) {
   if (!configPortalActive) {
@@ -1343,34 +1364,13 @@ bool handleCaptivePortalRedirect() {
   return true;
 }
 
-void configureConfigRoutes() {
-  apiServer.on("/", HTTP_GET, handleConfigRoot);
-  apiServer.on("/configure", HTTP_POST, handleConfigSubmit);
-  apiServer.on("/scan", HTTP_GET, handleScanWifi);
-  apiServer.onNotFound(handleConfigRoot);
-}
-
-void handleScanWifi() {
-  JsonDocument doc;
-  JsonArray arr = doc.to<JsonArray>();
-  const int16_t found = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
-  if (found > 0) {
-    for (int16_t idx = 0; idx < found; ++idx) {
-      JsonObject item = arr.add<JsonObject>();
-      item["ssid"] = WiFi.SSID(idx);
-      item["rssi"] = WiFi.RSSI(idx);
-    }
-  }
-  String payload;
-  serializeJson(doc, payload);
-  apiServer.send(200, F("application/json"), payload);
-}
-
 void startConfigPortal() {
+  if (configPortalActive) {
+    return;
+  }
   configPortalActive = true;
   configPortalAnnouncementSent = false;
   lastConfigPortalAnnounceMs = 0;
-  apiServer.stop();
   WiFi.disconnect(true, true);
   delay(100);
   WiFi.mode(WIFI_AP);
@@ -1380,12 +1380,12 @@ void startConfigPortal() {
   WiFi.softAPConfig(CONFIG_PORTAL_IP, CONFIG_PORTAL_IP, CONFIG_PORTAL_NETMASK);
   startCaptiveDns(CONFIG_PORTAL_IP);
   announceConfigPortalStatus(true);
-  configureConfigRoutes();
-  apiServer.begin();
-  apiServerEnabled = true;
 }
 
 void startApiServer() {
+  if (apiServerEnabled) {
+    return;
+  }
   apiServer.on("/", HTTP_GET, handleWebIndex);
   apiServer.on("/index.html", HTTP_GET, handleWebIndex);
   apiServer.on("/api", HTTP_GET, handleApiRoot);
@@ -1398,6 +1398,11 @@ void startApiServer() {
   apiServer.on("/api/door/open", HTTP_POST, handleDoorOpen);
   apiServer.on("/api/door/close", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/door/close", HTTP_POST, handleDoorClose);
+  apiServer.on("/api/wifi/scan", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/wifi/scan", HTTP_GET, handleScanWifi);
+  apiServer.on("/api/wifi/config", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/wifi/config", HTTP_GET, handleWifiConfigStatus);
+  apiServer.on("/api/wifi/config", HTTP_POST, handleWifiConfigUpdate);
   apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
@@ -1423,12 +1428,12 @@ void setup() {
 
   initDoorHardware();
   ensureFileSystem();
-  if (!RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT) {
+  initWifiPreferences();
+  if (!retainWifiCredentialsAfterReboot) {
     if (eraseStoredCredential()) {
-      Serial.println("Stored Wi-Fi credentials cleared (RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT=false).");
+      Serial.println("Stored Wi-Fi credentials cleared (retain setting disabled).");
     } else {
-      Serial.println(
-          "Requested Wi-Fi credential wipe failed; continuing with whatever is stored on disk.");
+      Serial.println("Requested Wi-Fi credential wipe failed; continuing with stored config.");
     }
   }
   loadDoorHistoryFromDisk();
@@ -1441,14 +1446,12 @@ void setup() {
   if (wifiReady) {
     Serial.print("Wi-Fi ready. IP address: ");
     Serial.println(WiFi.localIP());
+    syncClock();
   } else {
     Serial.println("Wi-Fi unavailable; starting configuration portal.");
     startConfigPortal();
-    recordDoorHistory("boot");
-    return;
   }
 
-  syncClock();
   startApiServer();
   recordDoorHistory("boot");
 }
@@ -1600,7 +1603,7 @@ bool connectToWifi() {
   }
 
   bool connected = false;
-  if (RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT) {
+  if (retainWifiCredentialsAfterReboot) {
     StoredCredential stored;
     if (loadStoredCredential(stored)) {
       Serial.printf("Attempting stored Wi-Fi credential for SSID '%s'.\n", stored.ssid.c_str());

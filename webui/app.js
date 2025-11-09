@@ -7,6 +7,8 @@ const DEFAULT_POMODORO_LENGTH_MS = DEFAULT_DOOR_TRAVEL_TIME_MS;
 const HISTORY_ENDPOINT = '/api/history';
 const HISTORY_POLL_INTERVAL_MS = 15000;
 const HISTORY_DISPLAY_LIMIT = 30;
+const WIFI_CONFIG_ENDPOINT = '/api/wifi/config';
+const WIFI_SCAN_ENDPOINT = '/api/wifi/scan';
 
 const state = {
   status: null,
@@ -19,7 +21,22 @@ const state = {
   currentTime: new Date(),
   initialized: false,
   doorHistory: [],
-  historyError: ''
+  historyError: '',
+  activeTab: 'dashboard',
+  wifiConfig: null,
+  wifiConfigLoading: false,
+  wifiSaving: false,
+  wifiMessage: '',
+  wifiMessageType: '',
+  wifiForm: {
+    ssid: '',
+    password: '',
+    retainCredentials: true
+  },
+  wifiFormDirty: false,
+  wifiScanResults: [],
+  wifiScanLoading: false,
+  wifiScanRequested: false
 };
 
 let countdownTimerId = null;
@@ -53,7 +70,21 @@ const elements = {
   wifiSignal: document.querySelector('[data-wifi-signal]'),
   wifiEmpty: document.querySelector('[data-wifi-empty]'),
   doorHistoryBody: document.querySelector('[data-door-history-body]'),
-  downloadHistoryButton: document.querySelector('[data-download-history]')
+  downloadHistoryButton: document.querySelector('[data-download-history]'),
+  dashboardPanel: document.querySelector('[data-dashboard-panel]'),
+  settingsPanel: document.querySelector('[data-settings-panel]'),
+  tabButtons: document.querySelectorAll('[data-tab-btn]'),
+  wifiForm: document.querySelector('[data-wifi-form]'),
+  wifiSsidInput: document.querySelector('[data-wifi-ssid-input]'),
+  wifiPasswordInput: document.querySelector('[data-wifi-password-input]'),
+  wifiRetainSelect: document.querySelector('[data-wifi-retain-select]'),
+  wifiSubmitButton: document.querySelector('[data-wifi-submit]'),
+  wifiScanButton: document.querySelector('[data-wifi-scan]'),
+  wifiScanResults: document.querySelector('[data-wifi-scan-results]'),
+  wifiMessage: document.querySelector('[data-wifi-message]'),
+  wifiApBadge: document.querySelector('[data-wifi-ap-badge]'),
+  wifiApHint: document.querySelector('[data-wifi-ap-hint]'),
+  wifiConfigMeta: document.querySelector('[data-wifi-config-meta]')
 };
 
 function setState(patch) {
@@ -101,13 +132,26 @@ function render() {
   const chipLabel = doorBusy() && currentDoor.motion && currentDoor.motion !== 'idle'
     ? currentDoor.motion
     : doorState();
-  const showInitialLoading = loading && !state.initialized;
+  const settingsActive = state.activeTab === 'settings';
+  const isDashboard = !settingsActive;
+  const showInitialLoading = loading && !state.initialized && isDashboard;
 
   if (elements.loadingSection) {
     elements.loadingSection.hidden = !showInitialLoading;
   }
   if (elements.cardsSection) {
-    elements.cardsSection.hidden = !state.initialized;
+    elements.cardsSection.hidden = !state.initialized || !isDashboard;
+  }
+  if (elements.dashboardPanel) {
+    elements.dashboardPanel.hidden = !isDashboard;
+  }
+  if (elements.settingsPanel) {
+    elements.settingsPanel.hidden = !settingsActive;
+  }
+  if (!settingsActive && elements.settingsPanel?.contains(document.activeElement)) {
+    if (typeof document.activeElement?.blur === 'function') {
+      document.activeElement.blur();
+    }
   }
   if (elements.statusHint) {
     let hintMessage = '';
@@ -120,7 +164,7 @@ function render() {
     } else if (state.commandInFlight === 'close') {
       hintMessage = 'Closing door...';
     }
-    const showHint = state.initialized && Boolean(hintMessage);
+    const showHint = state.initialized && Boolean(hintMessage) && isDashboard;
     elements.statusHint.hidden = !showHint;
     if (showHint) {
       elements.statusHint.textContent = hintMessage;
@@ -214,6 +258,84 @@ function render() {
     }
   }
 
+  if (elements.tabButtons && elements.tabButtons.length) {
+    elements.tabButtons.forEach((button) => {
+      const tabName = button.dataset.tabBtn ?? 'dashboard';
+      const isActive = tabName === state.activeTab;
+      button.classList.toggle('active', isActive);
+      button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+  }
+
+  const settingsLocked = !settingsActive || state.wifiSaving;
+  const configLoading = state.wifiConfigLoading && settingsActive;
+  if (elements.wifiSsidInput) {
+    elements.wifiSsidInput.value = state.wifiForm?.ssid ?? '';
+    elements.wifiSsidInput.disabled = settingsLocked;
+  }
+  if (elements.wifiPasswordInput) {
+    elements.wifiPasswordInput.value = state.wifiForm?.password ?? '';
+    elements.wifiPasswordInput.disabled = settingsLocked;
+  }
+  if (elements.wifiRetainSelect) {
+    const retainValue = state.wifiForm?.retainCredentials !== false;
+    elements.wifiRetainSelect.value = String(retainValue);
+    elements.wifiRetainSelect.disabled = settingsLocked;
+  }
+  if (elements.wifiSubmitButton) {
+    const hasSsid = Boolean((state.wifiForm?.ssid ?? '').trim());
+    const retainChanged = state.wifiConfig
+      ? state.wifiForm?.retainCredentials !== state.wifiConfig.retainCredentials
+      : false;
+    const canSubmit = settingsActive && (hasSsid || retainChanged) && !settingsLocked && !configLoading;
+    elements.wifiSubmitButton.disabled = !canSubmit;
+    elements.wifiSubmitButton.textContent = state.wifiSaving ? 'Saving...' : 'Save settings';
+  }
+  if (elements.wifiMessage) {
+    if (!settingsActive) {
+      elements.wifiMessage.hidden = true;
+    } else {
+      let messageText = state.wifiMessage;
+      let messageType = state.wifiMessageType || 'info';
+      if (!messageText && configLoading) {
+        messageText = 'Loading Wi-Fi settings...';
+        messageType = 'info';
+      }
+      const hasMessage = Boolean(messageText);
+      elements.wifiMessage.hidden = !hasMessage;
+      if (hasMessage) {
+        elements.wifiMessage.textContent = messageText;
+        elements.wifiMessage.className = `banner ${messageType}`;
+      }
+    }
+  }
+  if (elements.wifiApBadge) {
+    const showBadge = Boolean(state.wifiConfig?.configPortalActive);
+    elements.wifiApBadge.hidden = !showBadge;
+  }
+  if (elements.wifiApHint) {
+    if (state.wifiConfig?.configPortalActive) {
+      const apIp = state.wifiConfig.apIp ?? '192.168.4.1';
+      elements.wifiApHint.hidden = false;
+      elements.wifiApHint.textContent =
+        `Device hotspot '${state.wifiConfig.configSsid ?? 'CoopDoorSetup'}' is active at ${apIp}.`;
+    } else {
+      elements.wifiApHint.hidden = true;
+    }
+  }
+  if (elements.wifiConfigMeta) {
+    const storedLabel = state.wifiConfig?.hasStored
+      ? state.wifiConfig.storedSsid || 'Hidden SSID'
+      : null;
+    elements.wifiConfigMeta.textContent = storedLabel
+      ? `Stored SSID: ${storedLabel}`
+      : 'No stored Wi-Fi credentials yet.';
+  }
+  if (elements.wifiScanButton) {
+    elements.wifiScanButton.disabled = !settingsActive || state.wifiScanLoading;
+  }
+
+  renderWifiScanResults();
   renderDoorHistory();
 }
 
@@ -249,6 +371,49 @@ function renderDoorHistory() {
       </tr>
     `).join('');
   elements.doorHistoryBody.innerHTML = markup;
+}
+
+function renderWifiScanResults() {
+  if (!elements.wifiScanResults) {
+    return;
+  }
+  const container = elements.wifiScanResults;
+  if (state.activeTab !== 'settings') {
+    container.classList.remove('visible');
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = '';
+  if (!state.wifiScanRequested) {
+    container.classList.remove('visible');
+    return;
+  }
+  container.classList.add('visible');
+  if (state.wifiScanLoading) {
+    container.textContent = 'Scanning for networks...';
+    return;
+  }
+  const networks = Array.isArray(state.wifiScanResults) ? state.wifiScanResults : [];
+  if (!networks.length) {
+    container.textContent = 'No networks discovered yet.';
+    return;
+  }
+  networks.forEach((network) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'network-result';
+    button.dataset.networkSsid = network?.ssid ?? '';
+    const name = document.createElement('span');
+    name.textContent = network?.ssid ?? 'Unknown network';
+    button.appendChild(name);
+    if (network?.rssi != null) {
+      const rssi = document.createElement('span');
+      rssi.className = 'network-rssi';
+      rssi.textContent = `${network.rssi} dBm`;
+      button.appendChild(rssi);
+    }
+    container.appendChild(button);
+  });
 }
 
 function formatCurrentTime(date) {
@@ -348,6 +513,169 @@ function downloadHistoryCsv() {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+}
+
+function activateTab(tabName) {
+  if (state.activeTab === tabName) {
+    return;
+  }
+  const nextState = { activeTab: tabName };
+  if (tabName !== 'settings') {
+    nextState.wifiScanRequested = false;
+  }
+  setState(nextState);
+  if (tabName === 'settings' && !state.wifiConfig && !state.wifiConfigLoading) {
+    fetchWifiConfig();
+  }
+}
+
+async function fetchWifiConfig() {
+  if (state.wifiConfigLoading) {
+    return;
+  }
+  setState({ wifiConfigLoading: true, wifiMessage: '', wifiMessageType: '' });
+  try {
+    const response = await fetch(WIFI_CONFIG_ENDPOINT, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Settings request failed with HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    applyWifiConfig(payload);
+  } catch (error) {
+    console.error(error);
+    setState({
+      wifiConfigLoading: false,
+      wifiMessage: error?.message ?? 'Unable to load Wi-Fi settings.',
+      wifiMessageType: 'error'
+    });
+  }
+}
+
+function applyWifiConfig(payload) {
+  const retainValue = payload?.retainCredentials !== false;
+  const shouldSyncForm = !state.wifiFormDirty;
+  const nextForm = shouldSyncForm
+    ? {
+        ssid: payload?.storedSsid ?? '',
+        password: '',
+        retainCredentials: retainValue
+      }
+    : {
+        ...state.wifiForm,
+        retainCredentials: state.wifiForm?.retainCredentials ?? retainValue
+      };
+  setState({
+    wifiConfig: {
+      ...payload,
+      retainCredentials: retainValue
+    },
+    wifiConfigLoading: false,
+    wifiForm: nextForm,
+    wifiFormDirty: shouldSyncForm ? false : state.wifiFormDirty
+  });
+}
+
+function updateWifiFormField(field, value) {
+  setState({
+    wifiForm: {
+      ...state.wifiForm,
+      [field]: value
+    },
+    wifiFormDirty: true,
+    wifiMessage: '',
+    wifiMessageType: ''
+  });
+}
+
+async function handleWifiFormSubmit(event) {
+  event.preventDefault();
+  if (state.wifiSaving) {
+    return;
+  }
+  const ssid = (state.wifiForm?.ssid ?? '').trim();
+  const password = state.wifiForm?.password ?? '';
+  const retainValue = state.wifiForm?.retainCredentials !== false;
+  const retainChanged = state.wifiConfig
+    ? retainValue !== state.wifiConfig.retainCredentials
+    : false;
+  if (!ssid && !retainChanged) {
+    return;
+  }
+  const payload = { retainCredentials: retainValue };
+  if (ssid) {
+    payload.ssid = ssid;
+    payload.password = password;
+  }
+  setState({ wifiSaving: true, wifiMessage: '', wifiMessageType: '' });
+  try {
+    const response = await fetch(WIFI_CONFIG_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      cache: 'no-store'
+    });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      throw new Error(errorPayload?.error ?? `Save failed with HTTP ${response.status}`);
+    }
+    const result = await response.json();
+    const successMessage = result?.rebooting
+      ? 'Credentials saved. The controller is rebooting...'
+      : 'Wi-Fi settings updated.';
+    const nextForm = {
+      ...state.wifiForm,
+      password: '',
+      retainCredentials: retainValue
+    };
+    setState({
+      wifiSaving: false,
+      wifiMessage: successMessage,
+      wifiMessageType: 'success',
+      wifiForm: nextForm,
+      wifiFormDirty: false,
+      wifiConfig: state.wifiConfig
+        ? { ...state.wifiConfig, retainCredentials: retainValue }
+        : state.wifiConfig
+    });
+    if (!result?.rebooting) {
+      fetchWifiConfig();
+    }
+  } catch (error) {
+    console.error(error);
+    setState({
+      wifiSaving: false,
+      wifiMessage: error?.message ?? 'Unable to save Wi-Fi settings.',
+      wifiMessageType: 'error'
+    });
+  }
+}
+
+async function fetchWifiScan() {
+  if (state.wifiScanLoading) {
+    return;
+  }
+  setState({ wifiScanLoading: true, wifiScanRequested: true, wifiMessage: '', wifiMessageType: '' });
+  try {
+    const response = await fetch(WIFI_SCAN_ENDPOINT, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Scan failed with HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    const networks = Array.isArray(payload) ? payload : [];
+    setState({
+      wifiScanLoading: false,
+      wifiScanResults: networks
+    });
+  } catch (error) {
+    console.error(error);
+    setState({
+      wifiScanLoading: false,
+      wifiScanResults: [],
+      wifiScanRequested: true,
+      wifiMessage: error?.message ?? 'Wi-Fi scan failed.',
+      wifiMessageType: 'error'
+    });
+  }
 }
 
 function applyStatus(payload) {
@@ -531,6 +859,46 @@ if (elements.closeButton) {
 }
 if (elements.downloadHistoryButton) {
   elements.downloadHistoryButton.addEventListener('click', downloadHistoryCsv);
+}
+if (elements.tabButtons && elements.tabButtons.length) {
+  elements.tabButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const tabName = button.dataset.tabBtn ?? 'dashboard';
+      activateTab(tabName);
+    });
+  });
+}
+if (elements.wifiForm) {
+  elements.wifiForm.addEventListener('submit', handleWifiFormSubmit);
+}
+if (elements.wifiSsidInput) {
+  elements.wifiSsidInput.addEventListener('input', (event) => {
+    updateWifiFormField('ssid', event.target.value);
+  });
+}
+if (elements.wifiPasswordInput) {
+  elements.wifiPasswordInput.addEventListener('input', (event) => {
+    updateWifiFormField('password', event.target.value);
+  });
+}
+if (elements.wifiRetainSelect) {
+  elements.wifiRetainSelect.addEventListener('change', (event) => {
+    const retainValue = event.target.value === 'true';
+    updateWifiFormField('retainCredentials', retainValue);
+  });
+}
+if (elements.wifiScanButton) {
+  elements.wifiScanButton.addEventListener('click', fetchWifiScan);
+}
+if (elements.wifiScanResults) {
+  elements.wifiScanResults.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-network-ssid]');
+    if (!button) {
+      return;
+    }
+    const ssidValue = button.dataset.networkSsid ?? '';
+    updateWifiFormField('ssid', ssidValue);
+  });
 }
 
 window.addEventListener('beforeunload', () => {
