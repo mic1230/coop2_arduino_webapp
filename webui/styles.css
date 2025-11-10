@@ -316,6 +316,16 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.chip.success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.chip.danger {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -522,6 +532,85 @@ button.action-button.active-action {
   border: none;
   background: transparent;
   box-shadow: none;
+}
+
+.firmware-card .firmware-values {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.firmware-card .firmware-meta {
+  margin: 0;
+  color: #475569;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+.firmware-card .firmware-meta code {
+  font-size: 0.85rem;
+  background: #e2e8f0;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.35rem;
+  color: #0f172a;
+}
+
+.ota-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.file-input {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.file-input input[type='file'] {
+  padding: 0.6rem;
+  border: 2px dashed #94a3b8;
+  border-radius: 0.75rem;
+  background: #f8fafc;
+}
+
+.file-input input[type='file']::-webkit-file-upload-button {
+  border: none;
+  background: #1d4ed8;
+  color: #fff;
+  border-radius: 0.5rem;
+  padding: 0.35rem 0.85rem;
+  margin-right: 0.75rem;
+  cursor: pointer;
+}
+
+.ota-progress {
+  position: relative;
+  width: 100%;
+  height: 12px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.ota-progress .fill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  transition: width 150ms ease;
+  width: 0%;
+}
+
+.ota-progress span {
+  position: absolute;
+  top: 50%;
+  right: 0.4rem;
+  transform: translateY(-50%);
+  font-size: 0.75rem;
+  color: #fff;
+  font-weight: 600;
 }
 
 .timezone-section {

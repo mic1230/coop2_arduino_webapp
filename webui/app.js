@@ -81,7 +81,17 @@ const state = {
   pinLoading: false,
   pinSaving: false,
   pinMessage: '',
-  pinMessageType: ''
+  pinMessageType: '',
+  firmwareInfo: null,
+  otaStatus: null,
+  otaStatusLoading: false,
+  otaUploading: false,
+  otaUploadProgressBytes: 0,
+  otaUploadProgressTotal: 0,
+  otaMessage: '',
+  otaMessageType: '',
+  otaSelectedFileName: '',
+  otaSelectedFileSize: 0
 };
 
 function supportsLocalStorage() {
@@ -235,7 +245,25 @@ const elements = {
   schedulerRefreshButton: document.querySelector('[data-scheduler-refresh]'),
   geoInput: document.querySelector('[data-geo-input]'),
   geoSuggest: document.querySelector('[data-geo-suggest]'),
-  geoCountry: document.querySelector('[data-geo-country]')
+  geoCountry: document.querySelector('[data-geo-country]'),
+  firmwareCard: document.querySelector('[data-firmware-card]'),
+  firmwareDevice: document.querySelector('[data-firmware-device]'),
+  firmwareBuild: document.querySelector('[data-firmware-build]'),
+  firmwareSketch: document.querySelector('[data-firmware-sketch]'),
+  firmwareSpace: document.querySelector('[data-firmware-space]'),
+  firmwarePartition: document.querySelector('[data-firmware-partition]'),
+  firmwareNext: document.querySelector('[data-firmware-next]'),
+  firmwareHash: document.querySelector('[data-firmware-hash]'),
+  otaStatusChip: document.querySelector('[data-ota-status-chip]'),
+  otaForm: document.querySelector('[data-ota-form]'),
+  otaFileInput: document.querySelector('[data-ota-file]'),
+  otaFileMeta: document.querySelector('[data-ota-file-meta]'),
+  otaUploadButton: document.querySelector('[data-ota-upload]'),
+  otaClearButton: document.querySelector('[data-ota-clear]'),
+  otaProgressBar: document.querySelector('[data-ota-progress]'),
+  otaProgressFill: document.querySelector('[data-ota-progress-fill]'),
+  otaProgressLabel: document.querySelector('[data-ota-progress-label]'),
+  otaMessage: document.querySelector('[data-ota-message]')
 };
 
 function setState(patch) {
@@ -496,6 +524,95 @@ function render() {
   }
   if (elements.wifiScanButton) {
     elements.wifiScanButton.disabled = !settingsActive || state.wifiScanLoading;
+  }
+
+  const firmwareInfo = state.firmwareInfo ?? state.status?.firmware ?? null;
+  const otaStatus = state.otaStatus ?? state.status?.ota ?? null;
+  if (elements.firmwareDevice) {
+    elements.firmwareDevice.textContent = firmwareInfo?.device ?? '--';
+  }
+  if (elements.firmwareBuild) {
+    elements.firmwareBuild.textContent = formatFirmwareBuild(firmwareInfo);
+  }
+  if (elements.firmwareSketch) {
+    elements.firmwareSketch.textContent = formatBytes(firmwareInfo?.sketchSize);
+  }
+  if (elements.firmwareSpace) {
+    elements.firmwareSpace.textContent = formatBytes(firmwareInfo?.freeSpace);
+  }
+  if (elements.firmwarePartition) {
+    elements.firmwarePartition.textContent = firmwareInfo?.currentPartition || '--';
+  }
+  if (elements.firmwareNext) {
+    elements.firmwareNext.textContent = firmwareInfo?.nextPartition || '--';
+  }
+  if (elements.firmwareHash) {
+    elements.firmwareHash.textContent = firmwareInfo?.sketchMD5 || '--';
+  }
+  const otaChip = deriveOtaStatusChip(otaStatus, state.otaUploading);
+  if (elements.otaStatusChip) {
+    elements.otaStatusChip.textContent = otaChip.label;
+    elements.otaStatusChip.className = `chip ${otaChip.tone}`;
+  }
+  if (elements.otaFileMeta) {
+    elements.otaFileMeta.textContent = state.otaSelectedFileName
+      ? `${state.otaSelectedFileName} (${formatBytes(state.otaSelectedFileSize)})`
+      : 'No firmware selected.';
+  }
+  if (elements.otaFileInput) {
+    elements.otaFileInput.disabled = !settingsActive || state.otaUploading;
+  }
+  if (elements.otaUploadButton) {
+    const hasFile = Boolean(state.otaSelectedFileName);
+    const locked = !settingsActive || state.otaUploading;
+    elements.otaUploadButton.disabled = locked || !hasFile;
+    elements.otaUploadButton.textContent = state.otaUploading ? 'Uploading...' : 'Upload firmware';
+  }
+  if (elements.otaClearButton) {
+    const hasFile = Boolean(state.otaSelectedFileName);
+    elements.otaClearButton.disabled = state.otaUploading || !hasFile;
+  }
+  if (elements.otaProgressBar) {
+    const total = state.otaUploadProgressTotal || 0;
+    const showProgress = state.otaUploading && total > 0;
+    elements.otaProgressBar.hidden = !showProgress;
+    if (showProgress) {
+      const loaded = Math.min(state.otaUploadProgressBytes, total);
+      const percent = Math.min(100, Math.round((loaded / total) * 100));
+      if (elements.otaProgressFill) {
+        elements.otaProgressFill.style.width = `${percent}%`;
+      }
+      if (elements.otaProgressLabel) {
+        elements.otaProgressLabel.textContent = `${percent}%`;
+      }
+    }
+  }
+  if (elements.otaMessage) {
+    let messageText = state.otaMessage;
+    let messageType = state.otaMessageType || 'info';
+    if (!messageText) {
+      if (state.otaUploading) {
+        messageText = 'Uploading firmware...';
+        messageType = 'info';
+      } else if (otaStatus?.rebootPending) {
+        messageText = 'Upload complete. Waiting for reboot...';
+        messageType = 'info';
+      } else if (otaStatus?.result === 'error' && otaStatus?.error) {
+        messageText = otaStatus.error;
+        messageType = 'error';
+      } else if (otaStatus?.result === 'success' && otaStatus?.filename) {
+        messageText = `Last update: ${otaStatus.filename}`;
+        messageType = 'success';
+      }
+    }
+    const showMessage = Boolean(messageText);
+    elements.otaMessage.hidden = !showMessage;
+    if (showMessage) {
+      elements.otaMessage.textContent = messageText;
+      elements.otaMessage.classList.remove('info', 'error', 'success');
+      elements.otaMessage.classList.add(messageType === 'error' ? 'error' :
+        messageType === 'success' ? 'success' : 'info');
+    }
   }
 
   const schedulerForm = state.schedulerForm ?? {};
@@ -881,7 +998,7 @@ async function fetchGeocodeSuggestions(query) {
     if (country) {
       url += `&country=${encodeURIComponent(country)}`;
     }
-    const response = await fetch(url, { cache: 'no-store' });
+    const response = await fetch(url, { cache: 'no-cache' });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -968,6 +1085,50 @@ function formatRssi(value) {
   return value == null ? '--' : `${value} dBm`;
 }
 
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '--';
+  }
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let bytes = value;
+  let unitIndex = 0;
+  while (bytes >= 1024 && unitIndex < units.length - 1) {
+    bytes /= 1024;
+    unitIndex += 1;
+  }
+  const decimals = bytes >= 100 || unitIndex === 0 ? 0 : 1;
+  return `${bytes.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+function formatFirmwareBuild(info) {
+  if (!info) {
+    return '--';
+  }
+  if (info.appVersion && info.projectName) {
+    return `${info.appVersion} (${info.projectName})`;
+  }
+  if (info.appVersion) {
+    return info.appVersion;
+  }
+  return info.buildTimestamp || info.buildDate || '--';
+}
+
+function deriveOtaStatusChip(status, uploading) {
+  if (uploading || status?.inProgress) {
+    return { label: 'Uploading', tone: 'warning' };
+  }
+  if (status?.rebootPending) {
+    return { label: 'Reboot pending', tone: 'warning' };
+  }
+  if (status?.result === 'success') {
+    return { label: 'Updated', tone: 'success' };
+  }
+  if (status?.result === 'error') {
+    return { label: 'Failed', tone: 'danger' };
+  }
+  return { label: 'Idle', tone: 'info' };
+}
+
 function describePinError(code) {
   switch (code) {
     case 'invalid_open_pin':
@@ -1049,7 +1210,7 @@ function formatCountdown(ms) {
 async function fetchDoorHistory() {
   const requestId = ++latestHistoryRequestId;
   try {
-    const response = await fetch(buildEndpoint('/api/history'), { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/history'), { cache: 'no-cache' });
     if (!response.ok) {
       throw new Error(`History request failed with HTTP ${response.status}`);
     }
@@ -1081,7 +1242,7 @@ async function fetchTimezoneConfig(force = false) {
     timezoneMessage: ''
   });
   try {
-    const response = await fetch(buildEndpoint('/api/timezone'), { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/timezone'), { cache: 'no-cache' });
     if (!response.ok) {
       throw new Error(`Timezone request failed with HTTP ${response.status}`);
     }
@@ -1115,7 +1276,7 @@ async function updateTimezoneSelection(timezoneId) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: trimmed }),
-      cache: 'no-store'
+      cache: 'no-cache'
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -1179,7 +1340,7 @@ async function fetchSchedulerConfig(force = false) {
     schedulerMessage: ''
   });
   try {
-    const response = await fetch(buildEndpoint('/api/schedule'), { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/schedule'), { cache: 'no-cache' });
     if (!response.ok) {
       throw new Error(`Schedule request failed with HTTP ${response.status}`);
     }
@@ -1265,7 +1426,7 @@ async function handleSchedulerSubmit(event) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      cache: 'no-store'
+      cache: 'no-cache'
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -1315,7 +1476,7 @@ async function fetchPinConfig(force = false) {
   }
   setState({ pinLoading: true, pinMessage: '', pinMessageType: '' });
   try {
-    const response = await fetch(buildEndpoint('/api/pins'), { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/pins'), { cache: 'no-cache' });
     const text = await response.text();
     let payload = null;
     if (text) {
@@ -1386,7 +1547,7 @@ async function handlePinFormSubmit(event) {
     const response = await fetch(buildEndpoint('/api/pins'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      cache: 'no-store',
+      cache: 'no-cache',
       body: JSON.stringify(payload)
     });
     const text = await response.text();
@@ -1419,9 +1580,142 @@ async function handlePinFormSubmit(event) {
     setState({
       pinSaving: false,
       pinMessage: error?.message ?? 'Unable to save pin configuration.',
-      pinMessageType: 'error'
+    pinMessageType: 'error'
+  });
+}
+
+function handleOtaFileChange(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) {
+    setState({
+      otaSelectedFileName: '',
+      otaSelectedFileSize: 0,
+      otaUploadProgressBytes: 0,
+      otaUploadProgressTotal: 0
+    });
+    return;
+  }
+  setState({
+    otaSelectedFileName: file.name,
+    otaSelectedFileSize: file.size,
+    otaUploadProgressBytes: 0,
+    otaUploadProgressTotal: 0,
+    otaMessage: '',
+    otaMessageType: ''
+  });
+}
+
+function clearOtaSelection(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (elements.otaFileInput) {
+    elements.otaFileInput.value = '';
+  }
+  setState({
+    otaSelectedFileName: '',
+    otaSelectedFileSize: 0,
+    otaUploadProgressBytes: 0,
+    otaUploadProgressTotal: 0
+  });
+}
+
+async function handleOtaUpload(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (state.otaUploading) {
+    return;
+  }
+  const file = elements.otaFileInput?.files?.[0];
+  if (!file) {
+    setState({
+      otaMessage: 'Select a firmware bundle first.',
+      otaMessageType: 'error'
+    });
+    return;
+  }
+  setState({
+    otaUploading: true,
+    otaMessage: '',
+    otaMessageType: '',
+    otaUploadProgressBytes: 0,
+    otaUploadProgressTotal: file.size
+  });
+  try {
+    await uploadFirmware(file);
+    setState({
+      otaUploading: false,
+      otaMessage: 'Upload complete. Waiting for controller to reboot...',
+      otaMessageType: 'info',
+      otaSelectedFileName: '',
+      otaSelectedFileSize: 0,
+      otaUploadProgressBytes: file.size,
+      otaUploadProgressTotal: file.size
+    });
+    if (elements.otaFileInput) {
+      elements.otaFileInput.value = '';
+    }
+    fetchFirmwareStatus(true);
+  } catch (error) {
+    console.error(error);
+    setState({
+      otaUploading: false,
+      otaMessage: error?.message ?? 'Unable to upload firmware.',
+      otaMessageType: 'error'
     });
   }
+}
+
+function uploadFirmware(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let reportedComplete = false;
+    xhr.open('POST', buildEndpoint('/api/ota/upload'), true);
+    const formData = new FormData();
+    formData.append('firmware', file, file.name);
+    xhr.upload.onprogress = (event) => {
+      const total = event.lengthComputable ? event.total : file.size;
+      const loaded = event.lengthComputable ? event.loaded : Math.min(file.size, event.loaded ?? 0);
+      if (loaded >= total) {
+        reportedComplete = true;
+      }
+      setState({
+        otaUploadProgressBytes: loaded,
+        otaUploadProgressTotal: total
+      });
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+        return;
+      }
+      if (xhr.status === 0 && reportedComplete) {
+        resolve();
+        return;
+      }
+      let message = 'Upload failed.';
+      try {
+        const payload = JSON.parse(xhr.responseText || '{}');
+        if (payload?.error) {
+          message = payload.error;
+        }
+      } catch (parseError) {
+        // ignore parse errors, use fallback message
+      }
+      reject(new Error(message));
+    };
+    xhr.onerror = () => {
+      if (reportedComplete) {
+        resolve();
+        return;
+      }
+      reject(new Error('Upload failed. Check your connection.'));
+    };
+    xhr.onabort = () => reject(new Error('Upload canceled.'));
+    xhr.send(formData);
+  });
+}
 }
 
 function downloadHistoryCsv() {
@@ -1457,6 +1751,9 @@ function activateTab(tabName) {
   if (tabName === 'settings' && !state.pinConfig && !state.pinLoading) {
     fetchPinConfig();
   }
+  if (tabName === 'settings' && !state.firmwareInfo && !state.otaStatusLoading) {
+    fetchFirmwareStatus();
+  }
 }
 
 async function fetchWifiConfig() {
@@ -1465,7 +1762,7 @@ async function fetchWifiConfig() {
   }
   setState({ wifiConfigLoading: true, wifiMessage: '', wifiMessageType: '' });
   try {
-    const response = await fetch(buildEndpoint('/api/wifi/config'), { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/wifi/config'), { cache: 'no-cache' });
     if (!response.ok) {
       throw new Error(`Settings request failed with HTTP ${response.status}`);
     }
@@ -1542,7 +1839,7 @@ async function handleWifiFormSubmit(event) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      cache: 'no-store'
+      cache: 'no-cache'
     });
     if (!response.ok) {
       const errorPayload = await response.json().catch(() => ({}));
@@ -1586,7 +1883,7 @@ async function fetchWifiScan() {
   }
   setState({ wifiScanLoading: true, wifiScanRequested: true, wifiMessage: '', wifiMessageType: '' });
   try {
-    const response = await fetch(buildEndpoint('/api/wifi/scan'), { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/wifi/scan'), { cache: 'no-cache' });
     if (!response.ok) {
       throw new Error(`Scan failed with HTTP ${response.status}`);
     }
@@ -1606,6 +1903,34 @@ async function fetchWifiScan() {
       wifiMessageType: 'error'
     });
   }
+}
+
+async function fetchFirmwareStatus(force = false) {
+  if (state.otaStatusLoading && !force) {
+    return;
+  }
+  setState({ otaStatusLoading: true });
+  try {
+    const response = await fetch(buildEndpoint('/api/ota'), { cache: 'no-cache' });
+    if (!response.ok) {
+      throw new Error(`Firmware status failed with HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    applyOtaStatus(payload);
+  } catch (error) {
+    console.error(error);
+    setState({ otaStatusLoading: false });
+  }
+}
+
+function applyOtaStatus(payload) {
+  const firmware = payload?.firmware ?? null;
+  const ota = payload?.ota ?? null;
+  setState({
+    firmwareInfo: firmware ?? state.firmwareInfo,
+    otaStatus: ota ?? state.otaStatus,
+    otaStatusLoading: false
+  });
 }
 
 function applyStatus(payload) {
@@ -1763,7 +2088,7 @@ async function fetchStatus(initial = false) {
   }
   setState({ errorMessage: '' });
   try {
-    const response = await fetch(buildEndpoint('/api/status'), { cache: 'no-store' });
+    const response = await fetch(buildEndpoint('/api/status'), { cache: 'no-cache' });
     if (!response.ok) {
       throw new Error(`Status request failed with HTTP ${response.status}`);
     }
@@ -1793,7 +2118,7 @@ async function sendDoorCommand(action) {
     const response = await fetch(buildEndpoint(`/api/door/${action}`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      cache: 'no-store'
+      cache: 'no-cache'
     });
     if (!response.ok) {
       throw new Error(`Command failed with HTTP ${response.status}`);
@@ -1814,6 +2139,7 @@ async function sendDoorCommand(action) {
 render();
 fetchStatus(true);
 fetchDoorHistory();
+fetchFirmwareStatus(true);
 
 const pollTimer = setInterval(fetchStatus, POLL_INTERVAL_MS);
 const clockTimer = setInterval(() => {
@@ -2042,6 +2368,16 @@ if (elements.geoCountry) {
       fetchGeocodeSuggestions(query);
     }
   });
+}
+
+if (elements.otaFileInput) {
+  elements.otaFileInput.addEventListener('change', handleOtaFileChange);
+}
+if (elements.otaForm) {
+  elements.otaForm.addEventListener('submit', handleOtaUpload);
+}
+if (elements.otaClearButton) {
+  elements.otaClearButton.addEventListener('click', clearOtaSelection);
 }
 document.addEventListener('click', (event) => {
   const nextPatch = {};
