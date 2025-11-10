@@ -94,9 +94,9 @@ void persistRetainWifiPreference(bool retain);
 //==============================================================================
 // Door control (ported from MicroPython open_door / close_door)
 //==============================================================================
-constexpr uint8_t DEFAULT_RELAY_OPEN_PIN = 17;   // Relay that drives the OPEN direction
-constexpr uint8_t DEFAULT_RELAY_CLOSE_PIN = 19;  // Relay that drives the CLOSE direction
-constexpr uint32_t DOOR_TRAVEL_TIME_MS = 5000;
+constexpr uint32_t DEFAULT_DOOR_TRAVEL_TIME_MS = 50000;
+constexpr uint32_t MIN_DOOR_TRAVEL_TIME_MS = 1000;
+constexpr uint32_t MAX_DOOR_TRAVEL_TIME_MS = 600000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
 constexpr bool TEST_MODE = false;  // When true, relays are not driven; logs only.
@@ -107,7 +107,6 @@ constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
 //==============================================================================
 // Sensor configuration (ported from MicroPython get_sensor_readings)
 //==============================================================================
-constexpr uint8_t DEFAULT_SENSOR_PIN = 3;
 constexpr uint8_t BATTERY_ADC_PIN = 1;  // Matches MicroPython's ADC Pin 1
 constexpr uint8_t DEFAULT_AVAILABLE_GPIO_PINS[] = {2,  4,  5,  12, 13, 14, 15, 16, 17, 18,
                                                    19, 21, 22, 23, 25, 26, 27, 32, 33};
@@ -115,12 +114,15 @@ constexpr size_t DEFAULT_AVAILABLE_GPIO_PIN_COUNT =
     sizeof(DEFAULT_AVAILABLE_GPIO_PINS) / sizeof(DEFAULT_AVAILABLE_GPIO_PINS[0]);
 
 struct DoorPinConfig {
-  uint8_t openPin = DEFAULT_RELAY_OPEN_PIN;
-  uint8_t closePin = DEFAULT_RELAY_CLOSE_PIN;
-  uint8_t sensorPin = DEFAULT_SENSOR_PIN;
+  uint8_t openPin = 17;
+  uint8_t closePin = 19;
+  uint8_t sensorPin = 20;
+  uint32_t travelTimeMs = DEFAULT_DOOR_TRAVEL_TIME_MS;
 };
 
-DoorPinConfig doorPinConfig;
+constexpr DoorPinConfig DEFAULT_DOOR_PIN_ASSIGNMENTS = {17, 19, 2, DEFAULT_DOOR_TRAVEL_TIME_MS};
+
+DoorPinConfig doorPinConfig = DEFAULT_DOOR_PIN_ASSIGNMENTS;
 std::vector<uint8_t> availablePins =
     []() {
       std::vector<uint8_t> pins;
@@ -170,10 +172,8 @@ constexpr char PREF_KEY_SCHED_CLOSE_DAY[] = "sched_close_day";
 constexpr char PREF_KEY_SCHED_OPEN_TS[] = "sched_open_ts";
 constexpr char PREF_KEY_SCHED_CLOSE_TS[] = "sched_close_ts";
 constexpr char PREF_KEY_OVERRIDE_UNTIL[] = "override_until";
-constexpr char PREF_KEY_PIN_OPEN[] = "pin_open";
-constexpr char PREF_KEY_PIN_CLOSE[] = "pin_close";
-constexpr char PREF_KEY_PIN_SENSOR[] = "pin_sensor";
 constexpr const char *AVAILABLE_PINS_PATH = "/available_pins.json";
+constexpr const char *DOOR_PIN_ASSIGNMENTS_PATH = "/door_pins.json";
 
 struct SolarScheduleConfig {
   bool enabled = SOLAR_AUTOMATION_DEFAULT_ENABLED;
@@ -248,11 +248,13 @@ bool readTemperature(const DeviceAddress address, const char *label, float &valu
 SensorReadings getSensorReadings();
 void logSensorReadings();
 void resetTemperatureSensors();
-DoorPinConfig readDoorPinConfigFromPrefs();
+DoorPinConfig readDoorPinConfigFromFile();
 void loadDoorPinConfig();
 bool persistDoorPinConfig(const DoorPinConfig &config);
 bool validateDoorPinConfig(const DoorPinConfig &config, String &errorCode);
 void applyDoorPinConfig(const DoorPinConfig &config, bool persist);
+bool persistDoorPinAssignmentsFile(const DoorPinConfig &config);
+bool loadDoorPinAssignmentsFile(DoorPinConfig &configOut);
 bool ensureFileSystem();
 void loadDoorHistoryFromDisk();
 void trimDoorHistoryCsv();
@@ -666,6 +668,67 @@ bool loadAvailablePinsFromFile(std::vector<uint8_t> &pinsOut) {
   return true;
 }
 
+bool persistDoorPinAssignmentsFile(const DoorPinConfig &config) {
+  if (!ensureFileSystem()) {
+    return false;
+  }
+  File file = LittleFS.open(DOOR_PIN_ASSIGNMENTS_PATH, "w");
+  if (!file) {
+    Serial.println("Failed to open door pin assignment file for writing.");
+    return false;
+  }
+  ArduinoJson::JsonDocument doc;
+  doc["openPin"] = config.openPin;
+  doc["closePin"] = config.closePin;
+  doc["sensorPin"] = config.sensorPin;
+  doc["travelTimeMs"] = config.travelTimeMs;
+  const bool ok = serializeJson(doc, file) > 0;
+  file.close();
+  if (!ok) {
+    Serial.println("Failed to write door pin assignment file.");
+  }
+  return ok;
+}
+
+bool loadDoorPinAssignmentsFile(DoorPinConfig &configOut) {
+  if (!ensureFileSystem() || !LittleFS.exists(DOOR_PIN_ASSIGNMENTS_PATH)) {
+    return false;
+  }
+  File file = LittleFS.open(DOOR_PIN_ASSIGNMENTS_PATH, "r");
+  if (!file) {
+    Serial.println("Failed to open door pin assignment file for reading.");
+    return false;
+  }
+  ArduinoJson::JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    Serial.printf("Unable to parse door pin assignment file: %s\n", error.c_str());
+    return false;
+  }
+  if (!doc["openPin"].is<int>() || !doc["closePin"].is<int>() || !doc["sensorPin"].is<int>()) {
+    Serial.println("Door pin assignment file missing required fields.");
+    return false;
+  }
+  configOut.openPin = static_cast<uint8_t>(doc["openPin"].as<int>());
+  configOut.closePin = static_cast<uint8_t>(doc["closePin"].as<int>());
+  configOut.sensorPin = static_cast<uint8_t>(doc["sensorPin"].as<int>());
+  const JsonVariant travelVariant = doc["travelTimeMs"];
+  uint32_t travelTime = DEFAULT_DOOR_TRAVEL_TIME_MS;
+  if (!travelVariant.isNull()) {
+    if (travelVariant.is<long>()) {
+      const long signedValue = travelVariant.as<long>();
+      if (signedValue >= 0) {
+        travelTime = static_cast<uint32_t>(signedValue);
+      }
+    } else if (travelVariant.is<unsigned long>()) {
+      travelTime = static_cast<uint32_t>(travelVariant.as<unsigned long>());
+    }
+  }
+  configOut.travelTimeMs = travelTime;
+  return true;
+}
+
 void ensureAvailablePinsCatalog() {
   std::vector<uint8_t> pins;
   if (loadAvailablePinsFromFile(pins)) {
@@ -677,8 +740,8 @@ void ensureAvailablePinsCatalog() {
   pins = detectAvailablePins();
   if (pins.empty()) {
     Serial.println("No GPIO pins detected; falling back to safe defaults.");
-    pins.push_back(DEFAULT_RELAY_OPEN_PIN);
-    pins.push_back(DEFAULT_RELAY_CLOSE_PIN);
+    pins.push_back(DEFAULT_DOOR_PIN_ASSIGNMENTS.openPin);
+    pins.push_back(DEFAULT_DOOR_PIN_ASSIGNMENTS.closePin);
   }
   availablePins = pins;
   if (persistAvailablePinsFile(availablePins)) {
@@ -707,48 +770,57 @@ bool validateDoorPinConfig(const DoorPinConfig &config, String &errorCode) {
     errorCode = F("pin_conflict");
     return false;
   }
+  if (config.travelTimeMs < MIN_DOOR_TRAVEL_TIME_MS ||
+      config.travelTimeMs > MAX_DOOR_TRAVEL_TIME_MS) {
+    errorCode = F("invalid_travel_time");
+    return false;
+  }
   return true;
 }
 
 bool persistDoorPinConfig(const DoorPinConfig &config) {
-  if (!initDoorPreferences()) {
-    Serial.println("Unable to persist door pin configuration (prefs unavailable).");
+  if (!persistDoorPinAssignmentsFile(config)) {
+    Serial.println("Unable to persist door pin configuration (file error).");
     return false;
   }
-  doorPrefs.putUChar(PREF_KEY_PIN_OPEN, config.openPin);
-  doorPrefs.putUChar(PREF_KEY_PIN_CLOSE, config.closePin);
-  doorPrefs.putUChar(PREF_KEY_PIN_SENSOR, config.sensorPin);
-  Serial.printf("Door pin configuration saved (open=%u close=%u sensor=%u).\n",
+  Serial.printf("Door config saved (open=%u close=%u sensor=%u travel=%lu ms).\n",
                 static_cast<unsigned>(config.openPin), static_cast<unsigned>(config.closePin),
-                static_cast<unsigned>(config.sensorPin));
+                static_cast<unsigned>(config.sensorPin),
+                static_cast<unsigned long>(config.travelTimeMs));
   return true;
 }
 
-DoorPinConfig readDoorPinConfigFromPrefs() {
-  DoorPinConfig config;
-  if (!initDoorPreferences()) {
-    Serial.println("Door preferences unavailable; using default pin configuration.");
-    return config;
+DoorPinConfig readDoorPinConfigFromFile() {
+  DoorPinConfig config = DEFAULT_DOOR_PIN_ASSIGNMENTS;
+  DoorPinConfig stored;
+  if (loadDoorPinAssignmentsFile(stored)) {
+    String error;
+    if (!validateDoorPinConfig(stored, error)) {
+      Serial.printf(
+          "Door pin assignment file invalid (%s). Reverting to defaults (open=%u close=%u sensor=%u travel=%lu ms).\n",
+          error.c_str(), static_cast<unsigned>(DEFAULT_DOOR_PIN_ASSIGNMENTS.openPin),
+          static_cast<unsigned>(DEFAULT_DOOR_PIN_ASSIGNMENTS.closePin),
+          static_cast<unsigned>(DEFAULT_DOOR_PIN_ASSIGNMENTS.sensorPin),
+          static_cast<unsigned long>(DEFAULT_DOOR_PIN_ASSIGNMENTS.travelTimeMs));
+    } else {
+      Serial.printf("Door pin configuration loaded (open=%u close=%u sensor=%u travel=%lu ms).\n",
+                    static_cast<unsigned>(stored.openPin),
+                    static_cast<unsigned>(stored.closePin),
+                    static_cast<unsigned>(stored.sensorPin),
+                    static_cast<unsigned long>(stored.travelTimeMs));
+      return stored;
+    }
+  } else {
+    Serial.println("Door pin assignment file missing; initializing with defaults.");
   }
-  config.openPin = doorPrefs.getUChar(PREF_KEY_PIN_OPEN, config.openPin);
-  config.closePin = doorPrefs.getUChar(PREF_KEY_PIN_CLOSE, config.closePin);
-  config.sensorPin = doorPrefs.getUChar(PREF_KEY_PIN_SENSOR, config.sensorPin);
-  String error;
-  if (!validateDoorPinConfig(config, error)) {
-    Serial.printf("Persisted door pin configuration invalid (%s). Using defaults (%u,%u,%u).\n",
-                  error.c_str(), static_cast<unsigned>(DEFAULT_RELAY_OPEN_PIN),
-                  static_cast<unsigned>(DEFAULT_RELAY_CLOSE_PIN),
-                  static_cast<unsigned>(DEFAULT_SENSOR_PIN));
-    return DoorPinConfig{};
+  if (!persistDoorPinAssignmentsFile(config)) {
+    Serial.println("Failed to write default door pin assignment file.");
   }
-  Serial.printf("Door pin configuration loaded (open=%u close=%u sensor=%u).\n",
-                static_cast<unsigned>(config.openPin), static_cast<unsigned>(config.closePin),
-                static_cast<unsigned>(config.sensorPin));
   return config;
 }
 
 void loadDoorPinConfig() {
-  doorPinConfig = readDoorPinConfigFromPrefs();
+  doorPinConfig = readDoorPinConfigFromFile();
 }
 
 void applyDoorPinConfig(const DoorPinConfig &config, bool persist) {
@@ -775,6 +847,8 @@ String doorPinConfigToJson(bool includeAvailablePins) {
   json += String(doorPinConfig.closePin);
   json += F(",\"sensorPin\":");
   json += String(doorPinConfig.sensorPin);
+  json += F(",\"travelTimeMs\":");
+  json += String(doorPinConfig.travelTimeMs);
   if (includeAvailablePins) {
     json += F(",\"availablePins\":[");
     for (size_t idx = 0; idx < availablePins.size(); ++idx) {
@@ -970,7 +1044,7 @@ void updateDoorMotion() {
     return;
   }
   const uint32_t elapsed = millis() - doorMotion.motionStartMs;
-  if (elapsed >= DOOR_TRAVEL_TIME_MS) {
+  if (elapsed >= doorPinConfig.travelTimeMs) {
     completeDoorMotion();
   }
 }
@@ -1998,12 +2072,13 @@ String doorStatusToJson(DoorState persistedState) {
   const bool busy = motion != DoorMotion::Idle;
   const DoorState target = busy ? doorMotion.targetState : persistedState;
   uint32_t remainingMs = 0;
+  const uint32_t travelTimeMs = doorPinConfig.travelTimeMs;
   if (busy) {
     const uint32_t elapsed = millis() - doorMotion.motionStartMs;
-    if (elapsed >= DOOR_TRAVEL_TIME_MS) {
+    if (elapsed >= travelTimeMs) {
       remainingMs = 0;
     } else {
-      remainingMs = DOOR_TRAVEL_TIME_MS - elapsed;
+      remainingMs = travelTimeMs - elapsed;
     }
   }
   String json;
@@ -2031,7 +2106,7 @@ String doorStatusToJson(DoorState persistedState) {
     json += F("null");
   }
   json += F(",\"travelTimeMs\":");
-  json += String(DOOR_TRAVEL_TIME_MS);
+  json += String(travelTimeMs);
   json += F(",\"uptimeMs\":");
   json += String(millis());
   json += F("}");
@@ -2720,6 +2795,20 @@ void handlePinConfigUpdate() {
   }
   if (!doc["sensorPin"].isNull()) {
     requested.sensorPin = static_cast<uint8_t>(doc["sensorPin"].as<int>());
+    changed = true;
+  }
+  if (!doc["travelTimeMs"].isNull()) {
+    const JsonVariant travelVariant = doc["travelTimeMs"];
+    if (!travelVariant.is<long>() && !travelVariant.is<unsigned long>()) {
+      sendJsonResponse(400, F("{\"error\":\"invalid_travel_time\"}"));
+      return;
+    }
+    const long travelValue = travelVariant.as<long>();
+    if (travelValue < 0) {
+      sendJsonResponse(400, F("{\"error\":\"invalid_travel_time\"}"));
+      return;
+    }
+    requested.travelTimeMs = static_cast<uint32_t>(travelValue);
     changed = true;
   }
   if (!changed) {
