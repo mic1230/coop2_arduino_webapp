@@ -4,3 +4,6 @@
 .vscode/launch.json
 .vscode/ipch
 chicken-coop2-micropython/
+build_verbose.log
+cert_gen.log
+managed_components/

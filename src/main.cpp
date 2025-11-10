@@ -94,8 +94,8 @@ void persistRetainWifiPreference(bool retain);
 //==============================================================================
 // Door control (ported from MicroPython open_door / close_door)
 //==============================================================================
-constexpr uint8_t DEFAULT_RELAY_OPEN_PIN = 4;   // Relay that drives the OPEN direction
-constexpr uint8_t DEFAULT_RELAY_CLOSE_PIN = 5;  // Relay that drives the CLOSE direction
+constexpr uint8_t DEFAULT_RELAY_OPEN_PIN = 17;   // Relay that drives the OPEN direction
+constexpr uint8_t DEFAULT_RELAY_CLOSE_PIN = 19;  // Relay that drives the CLOSE direction
 constexpr uint32_t DOOR_TRAVEL_TIME_MS = 5000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
@@ -610,8 +610,8 @@ bool persistAvailablePinsFile(const std::vector<uint8_t> &pins) {
     Serial.println("Failed to open available pins catalog for writing.");
     return false;
   }
-  StaticJsonDocument<256> doc;
-  JsonArray arr = doc.createNestedArray("pins");
+  ArduinoJson::JsonDocument doc;
+  JsonArray arr = doc["pins"].to<JsonArray>();
   for (uint8_t pin : pins) {
     arr.add(pin);
   }
@@ -636,7 +636,7 @@ bool loadAvailablePinsFromFile(std::vector<uint8_t> &pinsOut) {
     Serial.println("Failed to open available pins catalog for reading.");
     return false;
   }
-  StaticJsonDocument<256> doc;
+  ArduinoJson::JsonDocument doc;
   const DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
@@ -860,7 +860,7 @@ void failOtaUpdate(const String &message) {
 }
 
 String firmwareMetadataToJson() {
-  const esp_app_desc_t *app = esp_ota_get_app_description();
+  const esp_app_desc_t *app = esp_app_get_description();
   const esp_partition_t *running = esp_ota_get_running_partition();
   const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
   String json;
@@ -892,9 +892,9 @@ String firmwareMetadataToJson() {
   json += F(",\"flashSpeedHz\":");
   json += String(ESP.getFlashChipSpeed());
   json += F(",\"currentPartition\":\"");
-  json += running && running->label ? escapeJson(String(running->label)) : String("");
+  json += running ? escapeJson(String(running->label)) : String("");
   json += F("\",\"nextPartition\":\"");
-  json += next && next->label ? escapeJson(String(next->label)) : String("");
+  json += next ? escapeJson(String(next->label)) : String("");
   json += F("\",\"uptimeMs\":");
   json += String(millis());
   json += F("}");
@@ -1140,7 +1140,7 @@ bool loadStoredCredential(StoredCredential &cred) {
     Serial.println("Failed to open Wi-Fi credential file.");
     return false;
   }
-  StaticJsonDocument<256> doc;
+  ArduinoJson::JsonDocument doc;
   DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
@@ -1161,7 +1161,7 @@ bool saveStoredCredential(const String &ssid, const String &password) {
   if (!ensureFileSystem()) {
     return false;
   }
-  StaticJsonDocument<256> doc;
+  ArduinoJson::JsonDocument doc;
   doc["ssid"] = ssid;
   doc["password"] = password;
   File file = LittleFS.open(WIFI_CREDENTIAL_PATH, "w");
@@ -1276,7 +1276,7 @@ bool loadSolarScheduleConfig() {
     Serial.println("Failed to open solar scheduler config.");
     return false;
   }
-  StaticJsonDocument<256> doc;
+  ArduinoJson::JsonDocument doc;
   const DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
@@ -1319,7 +1319,7 @@ bool saveSolarScheduleConfig(const SolarScheduleConfig &config) {
   if (!ensureFileSystem()) {
     return false;
   }
-  StaticJsonDocument<256> doc;
+  ArduinoJson::JsonDocument doc;
   doc["enabled"] = config.enabled;
   doc["latitude"] = config.latitude;
   doc["longitude"] = config.longitude;
@@ -1592,10 +1592,11 @@ String formatHistoryTimestamp(time_t ts) {
   time_t adjusted = ts + offsetSeconds;
   struct tm timeinfo;
   gmtime_r(&adjusted, &timeinfo);
-  char buffer[20];
-  std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
-                timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour,
-                timeinfo.tm_min, timeinfo.tm_sec);
+  char buffer[32];
+  size_t written = std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  if (written == 0) {
+    return String(F("1970-01-01 00:00:00"));
+  }
   return String(buffer);
 }
 
@@ -2422,7 +2423,7 @@ void handleNotFound() {
 }
 
 void handleScanWifi() {
-  StaticJsonDocument<1024> doc;
+  ArduinoJson::JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
   const int16_t found = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
   if (found > 0) {
@@ -2441,7 +2442,7 @@ void handleWifiConfigStatus() {
   initWifiPreferences();
   StoredCredential stored;
   const bool hasStored = loadStoredCredential(stored);
-  StaticJsonDocument<256> doc;
+  ArduinoJson::JsonDocument doc;
   doc["retainCredentials"] = retainWifiCredentialsAfterReboot;
   doc["configPortalActive"] = configPortalActive;
   doc["configSsid"] = WIFI_CONFIG_AP_SSID;
@@ -2471,14 +2472,14 @@ void handleWifiConfigUpdate() {
     sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
     return;
   }
-  StaticJsonDocument<512> doc;
+  ArduinoJson::JsonDocument doc;
   const DeserializationError error = deserializeJson(doc, body);
   if (error) {
     sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
     return;
   }
-  const bool hasRetainField = doc.containsKey("retainCredentials");
-  const bool hasSsidField = doc.containsKey("ssid");
+  const bool hasRetainField = !doc["retainCredentials"].isNull();
+  const bool hasSsidField = !doc["ssid"].isNull();
   if (!hasRetainField && !hasSsidField) {
     sendJsonResponse(400, F("{\"error\":\"no_changes\"}"));
     return;
@@ -2505,7 +2506,7 @@ void handleWifiConfigUpdate() {
     }
     savedCredentials = true;
   }
-  StaticJsonDocument<256> response;
+  ArduinoJson::JsonDocument response;
   response["retainCredentials"] = retainWifiCredentialsAfterReboot;
   response["savedCredentials"] = savedCredentials;
   response["rebooting"] = savedCredentials;
@@ -2566,7 +2567,7 @@ void handleTimezoneUpdate() {
     sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
     return;
   }
-  StaticJsonDocument<128> doc;
+  ArduinoJson::JsonDocument doc;
   const DeserializationError error = deserializeJson(doc, body);
   if (error) {
     sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
@@ -2613,7 +2614,7 @@ void handleSolarScheduleUpdate() {
     sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
     return;
   }
-  StaticJsonDocument<256> doc;
+  ArduinoJson::JsonDocument doc;
   const DeserializationError error = deserializeJson(doc, body);
   if (error) {
     sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
@@ -2621,14 +2622,14 @@ void handleSolarScheduleUpdate() {
   }
   SolarScheduleConfig next = solarSchedule.config;
   bool changed = false;
-  if (doc.containsKey("enabled")) {
+  if (!doc["enabled"].isNull()) {
     const bool requested = doc["enabled"].as<bool>();
     if (requested != next.enabled) {
       next.enabled = requested;
       changed = true;
     }
   }
-  if (doc.containsKey("latitude")) {
+  if (!doc["latitude"].isNull()) {
     float lat = doc["latitude"].as<float>();
     if (!std::isfinite(lat)) {
       sendJsonResponse(400, F("{\"error\":\"invalid_latitude\"}"));
@@ -2640,7 +2641,7 @@ void handleSolarScheduleUpdate() {
       changed = true;
     }
   }
-  if (doc.containsKey("longitude")) {
+  if (!doc["longitude"].isNull()) {
     float lon = doc["longitude"].as<float>();
     if (!std::isfinite(lon)) {
       sendJsonResponse(400, F("{\"error\":\"invalid_longitude\"}"));
@@ -2653,7 +2654,7 @@ void handleSolarScheduleUpdate() {
     }
   }
   auto parseOffset = [&](const char *field, int &target) -> bool {
-    if (!doc.containsKey(field)) {
+    if (doc[field].isNull()) {
       return true;
     }
     int value = doc[field].as<int>();
@@ -2701,7 +2702,7 @@ void handlePinConfigUpdate() {
     sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
     return;
   }
-  StaticJsonDocument<128> doc;
+  ArduinoJson::JsonDocument doc;
   const DeserializationError error = deserializeJson(doc, body);
   if (error) {
     sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
@@ -2709,15 +2710,15 @@ void handlePinConfigUpdate() {
   }
   DoorPinConfig requested = doorPinConfig;
   bool changed = false;
-  if (doc.containsKey("openPin")) {
+  if (!doc["openPin"].isNull()) {
     requested.openPin = static_cast<uint8_t>(doc["openPin"].as<int>());
     changed = true;
   }
-  if (doc.containsKey("closePin")) {
+  if (!doc["closePin"].isNull()) {
     requested.closePin = static_cast<uint8_t>(doc["closePin"].as<int>());
     changed = true;
   }
-  if (doc.containsKey("sensorPin")) {
+  if (!doc["sensorPin"].isNull()) {
     requested.sensorPin = static_cast<uint8_t>(doc["sensorPin"].as<int>());
     changed = true;
   }
@@ -3042,7 +3043,8 @@ size_t collectConfiguredNetworks(NetworkCandidate *candidates, size_t maxCandida
     } else {
       Serial.print("Available networks: ");
       for (size_t idx = 0; idx < count; ++idx) {
-        Serial.printf("%s (%ddBm)%s", candidates[idx].credential->ssid, candidates[idx].rssi,
+        Serial.printf("%s (%ddBm)%s", candidates[idx].credential->ssid,
+                      static_cast<int>(candidates[idx].rssi),
                       idx + 1 < count ? ", " : "\n");
       }
     }

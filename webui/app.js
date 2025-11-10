@@ -2408,8 +2408,12 @@ pinFieldMap.forEach(({ element, field }) => {
   if (!element) {
     return;
   }
-  element.addEventListener('input', (event) => {
+  const handleSelectChange = (event) => {
     updatePinFormField(field, event.target.value);
+  };
+  // Safari does not emit 'input' events for <select>, so listen for both.
+  ['input', 'change'].forEach((eventName) => {
+    element.addEventListener(eventName, handleSelectChange);
   });
 });
 
