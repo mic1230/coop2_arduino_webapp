@@ -476,9 +476,21 @@ button.action-button.active-action {
   width: 100%;
   padding: 0.7rem 0.85rem;
   border-radius: 0.75rem;
-  border: 1px solid var(--coop-border);
-  background: rgba(255, 255, 255, 0.9);
+  border: 2px solid #94a3b8;
+  background: #fff;
   font-size: 1rem;
+  color: #0f172a;
+}
+
+.settings-form input::placeholder {
+  color: #64748b;
+}
+
+.settings-form input:focus,
+.settings-form select:focus {
+  outline: none;
+  border-color: #1d4ed8;
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.15);
 }
 
 .settings-form input[type="checkbox"] {
@@ -501,7 +513,7 @@ button.action-button.active-action {
 
 .timezone-trigger {
   width: 100%;
-  border: 1px solid var(--coop-border);
+  border: 2px solid #94a3b8;
   border-radius: 0.75rem;
   padding: 0.75rem 1rem;
   background: rgba(255, 255, 255, 0.9);
@@ -626,6 +638,43 @@ button.action-button.active-action {
   margin-bottom: 1rem;
 }
 
+.scheduler-summary .summary-card {
+  border: 2px solid var(--coop-border);
+  border-radius: 0.85rem;
+  padding: 0.75rem;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.08);
+}
+
+.scheduler-summary .summary-card .label {
+  color: #475569;
+  font-size: 0.75rem;
+}
+
+.scheduler-summary .summary-card strong {
+  font-size: 1.05rem;
+}
+
+.scheduler-summary .summary-card.next-action {
+  border-color: #6366f1;
+  background: #eef2ff;
+}
+
+.scheduler-summary .summary-card.sunrise,
+.scheduler-summary .summary-card.open-target {
+  border-color: #fbbf24;
+  background: #fef9c3;
+}
+
+.scheduler-summary .summary-card.sunset,
+.scheduler-summary .summary-card.close-target {
+  border-color: #f87171;
+  background: #fee2e2;
+}
+
 .scheduler-card .label {
   font-size: 0.75rem;
   text-transform: uppercase;
@@ -650,10 +699,73 @@ button.action-button.active-action {
   gap: 0.6rem;
 }
 
-.scheduler-toggle input[type="checkbox"] {
-  width: 1.25rem;
-  height: 1.25rem;
-  accent-color: #1d4ed8;
+.scheduler-toggle select {
+  min-width: 10rem;
+  padding: 0.45rem 0.6rem;
+  border: 2px solid #94a3b8;
+  border-radius: 0.55rem;
+  font: inherit;
+  background: #fff;
+}
+
+/* Location autocomplete */
+.geo-controls {
+  display: flex;
+  gap: 0.6rem;
+  align-items: stretch;
+}
+
+.geo-controls select {
+  flex: 0 0 11rem;
+  max-width: 11rem;
+}
+
+.geo-autocomplete {
+  position: relative;
+  flex: 1;
+}
+
+.geo-suggest {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin-top: 0.25rem;
+  background: #fff;
+  border: 2px solid #94a3b8;
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.15);
+  overflow: hidden;
+}
+
+.geo-suggest .item {
+  padding: 0.55rem 0.75rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--coop-border);
+}
+
+.geo-suggest .item:last-child {
+  border-bottom: none;
+}
+
+.geo-suggest .item:hover,
+.geo-suggest .item.active {
+  background: #dbeafe;
+}
+
+.geo-suggest .loading,
+.geo-suggest .empty,
+.geo-suggest .error {
+  padding: 0.6rem 0.75rem;
+  color: #64748b;
+}
+
+@media (max-width: 640px) {
+  .geo-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 @media (max-width: 640px) {

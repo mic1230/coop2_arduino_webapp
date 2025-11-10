@@ -4,6 +4,7 @@ const DEFAULT_DOOR_TRAVEL_TIME_MS = 50000;
 const DEFAULT_POMODORO_LENGTH_MS = DEFAULT_DOOR_TRAVEL_TIME_MS;
 const HISTORY_POLL_INTERVAL_MS = 15000;
 const HISTORY_DISPLAY_LIMIT = 30;
+const GEOCODE_DEBOUNCE_MS = 350;
 const DEFAULT_LATITUDE = 41.505;
 const DEFAULT_LONGITUDE = -81.69;
 const DEFAULT_SUNRISE_OFFSET = -15;
@@ -44,6 +45,13 @@ const state = {
   timezoneMessage: '',
   timezoneUpdating: '',
   timezonePickerOpen: false,
+  geocodeQuery: '',
+  geocodeLoading: false,
+  geocodeResults: [],
+  geocodeError: '',
+  geocodeOpen: false,
+  geocodeCountry: 'US',
+  geocodeActiveIndex: -1,
   schedulerStatus: null,
   schedulerLoading: false,
   schedulerSaving: false,
@@ -124,13 +132,16 @@ const elements = {
   schedulerMessage: document.querySelector('[data-scheduler-message]'),
   schedulerError: document.querySelector('[data-scheduler-error]'),
   schedulerForm: document.querySelector('[data-scheduler-form]'),
-  schedulerEnabledInput: document.querySelector('[data-scheduler-enabled-input]'),
+  schedulerEnabledSelect: document.querySelector('[data-scheduler-enabled-select]'),
   schedulerLatitudeInput: document.querySelector('[data-scheduler-latitude-input]'),
   schedulerLongitudeInput: document.querySelector('[data-scheduler-longitude-input]'),
   schedulerSunriseOffsetInput: document.querySelector('[data-scheduler-sunrise-offset-input]'),
   schedulerSunsetOffsetInput: document.querySelector('[data-scheduler-sunset-offset-input]'),
   schedulerSaveButton: document.querySelector('[data-scheduler-save]'),
-  schedulerRefreshButton: document.querySelector('[data-scheduler-refresh]')
+  schedulerRefreshButton: document.querySelector('[data-scheduler-refresh]'),
+  geoInput: document.querySelector('[data-geo-input]'),
+  geoSuggest: document.querySelector('[data-geo-suggest]'),
+  geoCountry: document.querySelector('[data-geo-country]')
 };
 
 function setState(patch) {
@@ -388,9 +399,9 @@ function render() {
 
   const schedulerForm = state.schedulerForm ?? {};
   const schedulerLocked = !settingsActive || state.schedulerLoading;
-  if (elements.schedulerEnabledInput) {
-    elements.schedulerEnabledInput.checked = Boolean(schedulerForm.enabled);
-    elements.schedulerEnabledInput.disabled = schedulerLocked;
+  if (elements.schedulerEnabledSelect) {
+    elements.schedulerEnabledSelect.value = schedulerForm.enabled ? 'true' : 'false';
+    elements.schedulerEnabledSelect.disabled = schedulerLocked;
   }
   if (elements.schedulerLatitudeInput) {
     elements.schedulerLatitudeInput.value =
@@ -412,6 +423,14 @@ function render() {
       schedulerForm.sunsetOffsetMinutes == null ? '' : String(schedulerForm.sunsetOffsetMinutes);
     elements.schedulerSunsetOffsetInput.disabled = schedulerLocked;
   }
+  if (elements.geoInput) {
+    elements.geoInput.value = state.geocodeQuery ?? '';
+    elements.geoInput.disabled = schedulerLocked;
+  }
+  if (elements.geoCountry) {
+    elements.geoCountry.value = state.geocodeCountry || '';
+    elements.geoCountry.disabled = schedulerLocked;
+  }
   if (elements.schedulerSaveButton) {
     const canSave =
       settingsActive && state.schedulerDirty && !state.schedulerSaving && !state.schedulerLoading;
@@ -426,6 +445,7 @@ function render() {
   renderDoorHistory();
   renderTimezonePicker();
   renderSchedulerPanel();
+  renderGeoSuggest();
 }
 
 function renderDoorHistory() {
@@ -576,8 +596,10 @@ function renderSchedulerPanel() {
     return;
   }
   const schedulerData = state.schedulerStatus ?? state.status?.scheduler ?? null;
+  const formEnabled = state.schedulerForm?.enabled;
   const enabled =
-    schedulerData?.enabled ?? Boolean(state.schedulerForm?.enabled ?? schedulerData?.enabled);
+    schedulerData?.enabled ??
+    (formEnabled === true || formEnabled === 'true');
   if (elements.schedulerEnabledChip) {
     elements.schedulerEnabledChip.textContent = enabled ? 'Automation enabled' : 'Automation disabled';
     elements.schedulerEnabledChip.className = `chip ${enabled ? 'success' : 'warning'}`;
@@ -590,7 +612,8 @@ function renderSchedulerPanel() {
       elements.schedulerNextAction.textContent =
         `${action} at ${formatSchedulerTime(schedulerData.nextActionTime)}`;
     } else {
-      elements.schedulerNextAction.textContent = 'No upcoming events scheduled today.';
+      elements.schedulerNextAction.textContent =
+        'No automation events scheduled for the remainder of today.';
     }
   }
   if (elements.schedulerSunriseTime) {
@@ -625,6 +648,95 @@ function renderSchedulerPanel() {
     if (showError) {
       elements.schedulerError.textContent = errorText;
     }
+  }
+}
+
+function renderGeoSuggest() {
+  if (!elements.geoSuggest) {
+    return;
+  }
+  const settingsActive = state.activeTab === 'settings';
+  if (!settingsActive) {
+    elements.geoSuggest.hidden = true;
+    elements.geoSuggest.innerHTML = '';
+    return;
+  }
+  const container = elements.geoSuggest;
+  const query = (state.geocodeQuery || '').trim();
+  const open = state.geocodeOpen && query.length >= 2;
+  if (!open) {
+    container.hidden = true;
+    container.innerHTML = '';
+    return;
+  }
+  container.hidden = false;
+  if (state.geocodeLoading) {
+    container.innerHTML = '<div class="loading">Searching...</div>';
+    return;
+  }
+  const results = Array.isArray(state.geocodeResults) ? state.geocodeResults : [];
+  if (!results.length) {
+    const message = state.geocodeError || 'No matches found.';
+    container.innerHTML = `<div class="empty">${message}</div>`;
+    return;
+  }
+  let activeIndex = typeof state.geocodeActiveIndex === 'number' ? state.geocodeActiveIndex : -1;
+  if (activeIndex < 0) {
+    activeIndex = 0;
+  } else if (activeIndex >= results.length) {
+    activeIndex = results.length - 1;
+  }
+  const items = results.map((place, idx) => {
+    const parts = [place.name, place.admin1, place.country].filter(Boolean);
+    const label = parts.join(', ');
+    const lat = typeof place.latitude === 'number' ? place.latitude.toFixed(5) : '';
+    const lon = typeof place.longitude === 'number' ? place.longitude.toFixed(5) : '';
+    const classes = idx === activeIndex ? 'item active' : 'item';
+    return `<div class="${classes}" data-geo-item data-geo-idx="${idx}" data-lat="${lat}" data-lon="${lon}" data-label="${label}">${label} — ${lat}, ${lon}</div>`;
+  }).join('');
+  container.innerHTML = items;
+}
+
+let geocodeTimerId = null;
+async function fetchGeocodeSuggestions(query) {
+  const trimmed = (query || '').trim();
+  if (trimmed.length < 2) {
+    setState({
+      geocodeLoading: false,
+      geocodeResults: [],
+      geocodeError: '',
+      geocodeActiveIndex: -1
+    });
+    return;
+  }
+  setState({ geocodeLoading: true, geocodeError: '' });
+  try {
+    let url =
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(trimmed)}&count=8&language=en&format=json`;
+    const country = (state.geocodeCountry || '').trim();
+    if (country) {
+      url += `&country=${encodeURIComponent(country)}`;
+    }
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const body = await response.json();
+    const results = Array.isArray(body?.results) ? body.results : [];
+    setState({
+      geocodeLoading: false,
+      geocodeResults: results,
+      geocodeError: '',
+      geocodeActiveIndex: results.length ? 0 : -1
+    });
+  } catch (error) {
+    console.error(error);
+    setState({
+      geocodeLoading: false,
+      geocodeResults: [],
+      geocodeError: 'Unable to load suggestions.',
+      geocodeActiveIndex: -1
+    });
   }
 }
 
@@ -892,12 +1004,13 @@ function updateSchedulerFormField(field, value) {
 
 function buildSchedulerPayload() {
   const form = state.schedulerForm ?? {};
+  const enabled = form.enabled === true || form.enabled === 'true';
   const latitude = parseFloat(form.latitude);
   const longitude = parseFloat(form.longitude);
   const sunriseOffset = parseInt(form.sunriseOffsetMinutes, 10);
   const sunsetOffset = parseInt(form.sunsetOffsetMinutes, 10);
   return {
-    enabled: Boolean(form.enabled),
+    enabled,
     latitude,
     longitude,
     sunriseOffsetMinutes: sunriseOffset,
@@ -984,6 +1097,7 @@ function activateTab(tabName) {
   if (tabName !== 'settings') {
     nextState.wifiScanRequested = false;
     nextState.timezonePickerOpen = false;
+    nextState.geocodeOpen = false;
   }
   setState(nextState);
   if (tabName === 'settings' && !state.wifiConfig && !state.wifiConfigLoading) {
@@ -1393,9 +1507,10 @@ if (elements.wifiScanResults) {
 if (elements.schedulerForm) {
   elements.schedulerForm.addEventListener('submit', handleSchedulerSubmit);
 }
-if (elements.schedulerEnabledInput) {
-  elements.schedulerEnabledInput.addEventListener('change', (event) => {
-    updateSchedulerFormField('enabled', event.target.checked);
+if (elements.schedulerEnabledSelect) {
+  elements.schedulerEnabledSelect.addEventListener('change', (event) => {
+    const enabled = event.target.value === 'true';
+    updateSchedulerFormField('enabled', enabled);
   });
 }
 if (elements.schedulerLatitudeInput) {
@@ -1421,14 +1536,133 @@ if (elements.schedulerSunsetOffsetInput) {
 if (elements.schedulerRefreshButton) {
   elements.schedulerRefreshButton.addEventListener('click', () => fetchSchedulerConfig(true));
 }
+
+if (elements.geoInput) {
+  elements.geoInput.addEventListener('input', (event) => {
+    const value = event.target.value || '';
+    const trimmed = value.trim();
+    setState({
+      geocodeQuery: value,
+      geocodeOpen: trimmed.length > 0,
+      geocodeActiveIndex: -1
+    });
+    if (geocodeTimerId) {
+      clearTimeout(geocodeTimerId);
+      geocodeTimerId = null;
+    }
+    if (trimmed.length < 2) {
+      setState({
+        geocodeResults: [],
+        geocodeError: '',
+        geocodeLoading: false,
+        geocodeActiveIndex: -1
+      });
+      return;
+    }
+    geocodeTimerId = setTimeout(() => {
+      fetchGeocodeSuggestions(value);
+    }, GEOCODE_DEBOUNCE_MS);
+  });
+
+  elements.geoInput.addEventListener('keydown', (event) => {
+    if (!state.geocodeOpen) {
+      return;
+    }
+    const results = Array.isArray(state.geocodeResults) ? state.geocodeResults : [];
+    if (!results.length) {
+      return;
+    }
+    let idx = typeof state.geocodeActiveIndex === 'number' ? state.geocodeActiveIndex : -1;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      idx = Math.min(results.length - 1, idx < 0 ? 0 : idx + 1);
+      setState({ geocodeActiveIndex: idx });
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      idx = Math.max(0, idx < 0 ? results.length - 1 : idx - 1);
+      setState({ geocodeActiveIndex: idx });
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      idx = Math.max(0, Math.min(idx < 0 ? 0 : idx, results.length - 1));
+      const choice = results[idx];
+      if (choice) {
+        const lat = typeof choice.latitude === 'number' ? choice.latitude.toFixed(5) : '';
+        const lon = typeof choice.longitude === 'number' ? choice.longitude.toFixed(5) : '';
+        const label = [choice.name, choice.admin1, choice.country].filter(Boolean).join(', ');
+        updateSchedulerFormField('latitude', lat);
+        updateSchedulerFormField('longitude', lon);
+        if (elements.geoInput) {
+          elements.geoInput.value = label;
+        }
+        setState({
+          geocodeOpen: false,
+          geocodeActiveIndex: -1,
+          geocodeQuery: label
+        });
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      setState({ geocodeOpen: false, geocodeActiveIndex: -1 });
+    }
+  });
+}
+
+if (elements.geoSuggest) {
+  elements.geoSuggest.addEventListener('click', (event) => {
+    const item = event.target.closest('[data-geo-item]');
+    if (!item) {
+      return;
+    }
+    const lat = item.getAttribute('data-lat') || '';
+    const lon = item.getAttribute('data-lon') || '';
+    const label = item.getAttribute('data-label') || '';
+    if (lat) {
+      updateSchedulerFormField('latitude', lat);
+    }
+    if (lon) {
+      updateSchedulerFormField('longitude', lon);
+    }
+    if (elements.geoInput) {
+      elements.geoInput.value = label;
+    }
+    setState({
+      geocodeOpen: false,
+      geocodeActiveIndex: -1,
+      geocodeQuery: label
+    });
+  });
+}
+
+if (elements.geoCountry) {
+  elements.geoCountry.addEventListener('change', (event) => {
+    const country = (event.target.value || '').trim();
+    setState({ geocodeCountry: country });
+    const query = (state.geocodeQuery || '').trim();
+    if (query.length >= 2) {
+      fetchGeocodeSuggestions(query);
+    }
+  });
+}
 document.addEventListener('click', (event) => {
-  if (!state.timezonePickerOpen) {
-    return;
+  const nextPatch = {};
+  if (state.timezonePickerOpen && !elements.timezoneSection?.contains(event.target)) {
+    nextPatch.timezonePickerOpen = false;
   }
-  if (elements.timezoneSection?.contains(event.target)) {
-    return;
+  if (state.geocodeOpen) {
+    const geoContainer = elements.geoInput?.closest('.geo-controls');
+    if (geoContainer && !geoContainer.contains(event.target)) {
+      nextPatch.geocodeOpen = false;
+      nextPatch.geocodeActiveIndex = -1;
+    }
   }
-  setState({ timezonePickerOpen: false });
+  if (Object.keys(nextPatch).length > 0) {
+    setState(nextPatch);
+  }
 });
 
 window.addEventListener('beforeunload', () => {

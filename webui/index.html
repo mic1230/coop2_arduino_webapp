@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Coop Door</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
-    <link rel="stylesheet" href="./styles.css?v=20251108.1" />
+    <link rel="stylesheet" href="./styles.css?v=20251110.3" />
   </head>
   <body>
     <main class="page container">
@@ -216,23 +216,23 @@
             <span class="chip warning" data-scheduler-enabled-chip>Automation disabled</span>
           </div>
           <div class="scheduler-summary">
-            <div>
+            <div class="summary-card next-action">
               <span class="label">Next action</span>
               <strong data-scheduler-next-action>--</strong>
             </div>
-            <div>
+            <div class="summary-card sunrise">
               <span class="label">Sunrise</span>
               <strong data-scheduler-sunrise-time>--</strong>
             </div>
-            <div>
+            <div class="summary-card open-target">
               <span class="label">Door open target</span>
               <strong data-scheduler-open-time>--</strong>
             </div>
-            <div>
+            <div class="summary-card sunset">
               <span class="label">Sunset</span>
               <strong data-scheduler-sunset-time>--</strong>
             </div>
-            <div>
+            <div class="summary-card close-target">
               <span class="label">Door close target</span>
               <strong data-scheduler-close-time>--</strong>
             </div>
@@ -251,8 +251,39 @@
           <div class="banner error" data-scheduler-error hidden></div>
           <form class="settings-form" data-scheduler-form>
             <label class="scheduler-toggle">
-              <input type="checkbox" data-scheduler-enabled-input />
-              <span>Enable sunrise/sunset automation</span>
+              <span>Sunrise/sunset automation</span>
+              <select data-scheduler-enabled-select>
+                <option value="true">Enable</option>
+                <option value="false">Disable</option>
+              </select>
+            </label>
+            <label>
+              Search location
+              <div class="geo-controls">
+                <select data-geo-country>
+                  <option value="">All countries</option>
+                  <option value="US" selected>United States</option>
+                  <option value="CA">Canada</option>
+                  <option value="GB">United Kingdom</option>
+                  <option value="AU">Australia</option>
+                  <option value="NZ">New Zealand</option>
+                  <option value="RO">Romania</option>
+                  <option value="DE">Germany</option>
+                  <option value="FR">France</option>
+                  <option value="ES">Spain</option>
+                  <option value="IT">Italy</option>
+                </select>
+                <div class="geo-autocomplete">
+                  <input
+                    type="text"
+                    autocomplete="off"
+                    placeholder="City, State or City, Country"
+                    data-geo-input
+                  />
+                  <div class="geo-suggest" data-geo-suggest hidden></div>
+                </div>
+              </div>
+              <p class="subtle small">Pick a match to fill coordinates.</p>
             </label>
             <div class="grid">
               <label>
@@ -290,7 +321,7 @@
         </article>
       </section>
     </main>
-    <script src="./app.js?v=20251109.0" type="module"></script>
+    <script src="./app.js?v=20251110.3" type="module"></script>
   </body>
 </html>
 
