@@ -69,6 +69,10 @@
               <button type="button" class="action-button" data-open-btn>Open door</button>
               <button type="button" class="action-button" data-close-btn>Close door</button>
             </div>
+            <div class="override-banner" data-override-banner hidden>
+              <span>Override active</span>
+              <strong data-override-countdown>--</strong>
+            </div>
             <div class="door-history">
               <div class="door-history-header">
                 <div>
@@ -213,7 +217,7 @@
               <h2>Door automation</h2>
               <p class="subtle">Automatically run the door around sunrise and sunset.</p>
             </div>
-            <span class="chip warning" data-scheduler-enabled-chip>Automation disabled</span>
+            <div class="automation-status" data-scheduler-enabled-chip>Automation disabled</div>
           </div>
           <div class="scheduler-summary">
             <div class="summary-card next-action">
@@ -253,6 +257,7 @@
             <label class="scheduler-toggle">
               <span>Sunrise/sunset automation</span>
               <select data-scheduler-enabled-select>
+                <option value="" selected>Select&hellip;</option>
                 <option value="true">Enable</option>
                 <option value="false">Disable</option>
               </select>

@@ -344,6 +344,29 @@ button.action-button.active-action {
   box-shadow: 0 18px 30px rgba(16, 185, 129, 0.35);
 }
 
+.override-banner {
+  margin-top: 0.85rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.85rem;
+  background: linear-gradient(135deg, #0f172a, #1e3a8a);
+  color: #fff;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.override-banner span {
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.override-banner strong {
+  font-size: 1.3rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .countdown {
   border: 1px solid var(--coop-border);
   border-radius: 0.9rem;
@@ -628,6 +651,27 @@ button.action-button.active-action {
   color: var(--coop-muted);
   font-size: 0.85rem;
   margin-left: 0.5rem;
+}
+
+.automation-status {
+  padding: 0.6rem 1rem;
+  border-radius: 0.75rem;
+  font-weight: 600;
+  border: 2px solid transparent;
+  min-width: 170px;
+  text-align: center;
+}
+
+.automation-status.enabled {
+  background: #dcfce7;
+  border-color: #22c55e;
+  color: #065f46;
+}
+
+.automation-status.disabled {
+  background: #fee2e2;
+  border-color: #ef4444;
+  color: #7f1d1d;
 }
 
 .scheduler-card .scheduler-summary,

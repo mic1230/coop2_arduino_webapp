@@ -136,6 +136,7 @@ constexpr double DEG_TO_RAD_D = 0.0174532925199432957692;
 constexpr double RAD_TO_DEG_D = 57.295779513082320876798;
 constexpr int MIN_SUN_OFFSET_MINUTES = -720;
 constexpr int MAX_SUN_OFFSET_MINUTES = 720;
+constexpr uint32_t MANUAL_OVERRIDE_DURATION_SECONDS = 30 * 60;
 constexpr int AVAILABLE_GPIO_PINS[] = {2,  4,  5,  12, 13, 14, 15, 16, 17, 18,
                                        19, 21, 22, 23, 25, 26, 27, 32, 33};
 constexpr size_t AVAILABLE_GPIO_PIN_COUNT = sizeof(AVAILABLE_GPIO_PINS) / sizeof(int);
@@ -143,6 +144,7 @@ constexpr char PREF_KEY_SCHED_OPEN_DAY[] = "sched_open_day";
 constexpr char PREF_KEY_SCHED_CLOSE_DAY[] = "sched_close_day";
 constexpr char PREF_KEY_SCHED_OPEN_TS[] = "sched_open_ts";
 constexpr char PREF_KEY_SCHED_CLOSE_TS[] = "sched_close_ts";
+constexpr char PREF_KEY_OVERRIDE_UNTIL[] = "override_until";
 
 struct SolarScheduleConfig {
   bool enabled = SOLAR_AUTOMATION_DEFAULT_ENABLED;
@@ -257,6 +259,11 @@ String chipDescriptor();
 String solarSchedulerStatusToJson(bool includeDeviceMeta = false);
 void handleSolarScheduleStatus();
 void handleSolarScheduleUpdate();
+void loadManualOverrideState();
+void persistManualOverrideState();
+void beginManualOverride();
+bool manualOverrideActive(time_t nowUtc = 0);
+void updateManualOverride(time_t nowUtc = 0);
 
 WebServer apiServer(80);
 bool apiServerEnabled = false;
@@ -327,6 +334,12 @@ struct DoorHistoryEntry {
 
 std::vector<DoorHistoryEntry> doorHistoryEntries;
 SolarScheduleRuntime solarSchedule;
+struct ManualOverrideState {
+  bool active = false;
+  time_t expiresUtc = 0;
+};
+
+ManualOverrideState manualOverride;
 uint16_t lastSunriseCommandDay = 0;
 uint16_t lastSunsetCommandDay = 0;
 time_t lastSunriseCommandTs = 0;
@@ -926,6 +939,65 @@ void persistSolarExecutionState() {
   doorPrefs.putULong(PREF_KEY_SCHED_CLOSE_TS, static_cast<uint32_t>(lastSunsetCommandTs));
 }
 
+void loadManualOverrideState() {
+  if (!initDoorPreferences()) {
+    manualOverride.active = false;
+    manualOverride.expiresUtc = 0;
+    return;
+  }
+  manualOverride.expiresUtc = static_cast<time_t>(doorPrefs.getULong(PREF_KEY_OVERRIDE_UNTIL, 0));
+  manualOverride.active = manualOverride.expiresUtc > 0;
+}
+
+void persistManualOverrideState() {
+  if (!initDoorPreferences()) {
+    return;
+  }
+  doorPrefs.putULong(PREF_KEY_OVERRIDE_UNTIL, static_cast<uint32_t>(manualOverride.expiresUtc));
+}
+
+bool manualOverrideActive(time_t nowTs) {
+  if (!manualOverride.active) {
+    return false;
+  }
+  if (manualOverride.expiresUtc == 0) {
+    manualOverride.active = false;
+    return false;
+  }
+  if (nowTs == 0) {
+    nowTs = currentTimestamp();
+  }
+  if (nowTs == 0) {
+    return manualOverride.active;
+  }
+  if (manualOverride.expiresUtc <= nowTs) {
+    Serial.println("Manual override expired.");
+    manualOverride.active = false;
+    manualOverride.expiresUtc = 0;
+    persistManualOverrideState();
+    return false;
+  }
+  return true;
+}
+
+void updateManualOverride(time_t nowTs) {
+  manualOverrideActive(nowTs);
+}
+
+void beginManualOverride() {
+  if (!solarSchedule.config.enabled) {
+    return;
+  }
+  time_t nowTs = currentTimestamp();
+  if (nowTs == 0) {
+    return;
+  }
+  manualOverride.active = true;
+  manualOverride.expiresUtc = nowTs + MANUAL_OVERRIDE_DURATION_SECONDS;
+  persistManualOverrideState();
+  Serial.printf("Manual override enabled until %lld.\n", static_cast<long long>(manualOverride.expiresUtc));
+}
+
 uint16_t localDayOfYear(time_t ts) {
   if (ts <= 0) {
     return 0;
@@ -1050,6 +1122,9 @@ void updateSolarScheduler() {
   }
   const time_t nowTs = currentTimestamp();
   if (nowTs == 0) {
+    return;
+  }
+  if (manualOverrideActive(nowTs)) {
     return;
   }
   if (!ensureSolarScheduleTimes(nowTs)) {
@@ -1637,6 +1712,27 @@ String solarSchedulerStatusToJson(bool includeDeviceMeta) {
   appendTs(lastSunriseCommandTs, lastSunriseCommandTs > 0);
   json += F(",\"lastCloseAction\":");
   appendTs(lastSunsetCommandTs, lastSunsetCommandTs > 0);
+  const bool overrideActive = manualOverrideActive(nowTs);
+  long overrideRemainingSeconds = 0;
+  if (overrideActive && manualOverride.expiresUtc > 0 && nowTs > 0) {
+    overrideRemainingSeconds =
+        static_cast<long>(manualOverride.expiresUtc - nowTs);
+    if (overrideRemainingSeconds < 0) {
+      overrideRemainingSeconds = 0;
+    }
+  }
+  json += F(",\"override\":{");
+  json += F("\"active\":");
+  json += overrideActive ? F("true") : F("false");
+  json += F(",\"remainingSeconds\":");
+  json += String(overrideRemainingSeconds);
+  json += F(",\"expiresAt\":");
+  if (overrideActive && manualOverride.expiresUtc > 0) {
+    json += String(static_cast<unsigned long>(manualOverride.expiresUtc));
+  } else {
+    json += F("null");
+  }
+  json += F("}");
   if (includeDeviceMeta) {
     json += F(",\"availablePins\":[");
     for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
@@ -1755,11 +1851,17 @@ String doorCommandResponseToJson(const __FlashStringHelper *actionLabel, DoorCom
 
 void handleDoorOpen() {
   const DoorCommandResult result = openDoor();
+  if (result == DoorCommandResult::Accepted) {
+    beginManualOverride();
+  }
   sendJsonResponse(200, doorCommandResponseToJson(F("open"), result));
 }
 
 void handleDoorClose() {
   const DoorCommandResult result = closeDoor();
+  if (result == DoorCommandResult::Accepted) {
+    beginManualOverride();
+  }
   sendJsonResponse(200, doorCommandResponseToJson(F("close"), result));
 }
 
@@ -2240,6 +2342,7 @@ void setup() {
   ensureFileSystem();
   loadSolarScheduleConfig();
   loadSolarScheduleExecutionState();
+  loadManualOverrideState();
   loadTimezonePreference();
   initWifiPreferences();
   if (!retainWifiCredentialsAfterReboot) {
@@ -2273,6 +2376,7 @@ void setup() {
 void loop() {
   updateSerialAttachmentAnnounce();
   updateDoorMotion();
+  updateManualOverride(0);
   updateSolarScheduler();
   maybeRecordHourlyHistory();
   announceConfigPortalStatus();

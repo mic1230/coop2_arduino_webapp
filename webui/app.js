@@ -11,6 +11,10 @@ const DEFAULT_SUNRISE_OFFSET = -15;
 const DEFAULT_SUNSET_OFFSET = 30;
 const MIN_SUN_OFFSET = -720;
 const MAX_SUN_OFFSET = 720;
+const STORAGE_KEYS = {
+  schedulerCoords: 'coopSchedulerCoords'
+};
+
 const state = {
   status: null,
   loading: true,
@@ -58,16 +62,86 @@ const state = {
   schedulerMessage: '',
   schedulerError: '',
   schedulerForm: {
-    enabled: false,
+    enabled: undefined,
     latitude: String(DEFAULT_LATITUDE),
     longitude: String(DEFAULT_LONGITUDE),
     sunriseOffsetMinutes: String(DEFAULT_SUNRISE_OFFSET),
     sunsetOffsetMinutes: String(DEFAULT_SUNSET_OFFSET)
   },
-  schedulerDirty: false
+  schedulerDirty: false,
+  overrideMs: null
 };
 
+function supportsLocalStorage() {
+  try {
+    return typeof window !== 'undefined' && !!window.localStorage;
+  } catch (error) {
+    console.warn('Local storage unavailable:', error);
+    return false;
+  }
+}
+
+function loadStoredSchedulerCoords() {
+  if (!supportsLocalStorage()) {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEYS.schedulerCoords);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    const latitude =
+      typeof parsed?.latitude === 'number'
+        ? String(parsed.latitude)
+        : (parsed?.latitude ?? '').toString();
+    const longitude =
+      typeof parsed?.longitude === 'number'
+        ? String(parsed.longitude)
+        : (parsed?.longitude ?? '').toString();
+    return {
+      latitude: latitude || '',
+      longitude: longitude || ''
+    };
+  } catch (error) {
+    console.warn('Unable to load cached coordinates:', error);
+    return null;
+  }
+}
+
+function persistSchedulerCoords(coords) {
+  if (!supportsLocalStorage()) {
+    return;
+  }
+  try {
+    if (!coords || !Number.isFinite(coords.latitude) || !Number.isFinite(coords.longitude)) {
+      window.localStorage.removeItem(STORAGE_KEYS.schedulerCoords);
+      return;
+    }
+    window.localStorage.setItem(
+      STORAGE_KEYS.schedulerCoords,
+      JSON.stringify({
+        latitude: coords.latitude,
+        longitude: coords.longitude
+      })
+    );
+  } catch (error) {
+    console.warn('Unable to save cached coordinates:', error);
+  }
+}
+
+const cachedCoords = loadStoredSchedulerCoords();
+if (cachedCoords) {
+  if (!state.schedulerForm.latitude) {
+    state.schedulerForm.latitude = cachedCoords.latitude;
+  }
+  if (!state.schedulerForm.longitude) {
+    state.schedulerForm.longitude = cachedCoords.longitude;
+  }
+}
+
 let countdownTimerId = null;
+let overrideTimerId = null;
 let latestStatusRequestId = 0;
 let latestHistoryRequestId = 0;
 let historyPollTimer = null;
@@ -86,6 +160,8 @@ const elements = {
   countdownMeta: document.querySelector('[data-countdown-meta]'),
   countdownBar: document.querySelector('[data-countdown-bar]'),
   countdownFill: document.querySelector('[data-countdown-fill]'),
+  overrideBanner: document.querySelector('[data-override-banner]'),
+  overrideCountdown: document.querySelector('[data-override-countdown]'),
   testModeChip: document.querySelector('[data-test-mode]'),
   openButton: document.querySelector('[data-open-btn]'),
   closeButton: document.querySelector('[data-close-btn]'),
@@ -273,6 +349,13 @@ function render() {
     }
     elements.countdownMeta.textContent = parts.join(' ');
   }
+  const showOverride = typeof state.overrideMs === 'number' && state.overrideMs > 0;
+  if (elements.overrideBanner) {
+    elements.overrideBanner.hidden = !showOverride;
+  }
+  if (showOverride && elements.overrideCountdown) {
+    elements.overrideCountdown.textContent = formatOverrideCountdown(state.overrideMs);
+  }
 
   if (elements.testModeChip) {
     const showTest = Boolean(currentDoor.testMode);
@@ -400,7 +483,9 @@ function render() {
   const schedulerForm = state.schedulerForm ?? {};
   const schedulerLocked = !settingsActive || state.schedulerLoading;
   if (elements.schedulerEnabledSelect) {
-    elements.schedulerEnabledSelect.value = schedulerForm.enabled ? 'true' : 'false';
+    const selectEmpty = schedulerForm.enabled === undefined || schedulerForm.enabled === null;
+    elements.schedulerEnabledSelect.value = selectEmpty ? '' : (schedulerForm.enabled ? 'true' : 'false');
+    elements.schedulerEnabledSelect.classList.toggle('empty', selectEmpty);
     elements.schedulerEnabledSelect.disabled = schedulerLocked;
   }
   if (elements.schedulerLatitudeInput) {
@@ -602,7 +687,7 @@ function renderSchedulerPanel() {
     (formEnabled === true || formEnabled === 'true');
   if (elements.schedulerEnabledChip) {
     elements.schedulerEnabledChip.textContent = enabled ? 'Automation enabled' : 'Automation disabled';
-    elements.schedulerEnabledChip.className = `chip ${enabled ? 'success' : 'warning'}`;
+    elements.schedulerEnabledChip.className = `automation-status ${enabled ? 'enabled' : 'disabled'}`;
   }
   if (elements.schedulerNextAction) {
     if (state.schedulerLoading) {
@@ -742,6 +827,16 @@ async function fetchGeocodeSuggestions(query) {
 
 function formatCurrentTime(date) {
   return date ? date.toLocaleTimeString() : '--';
+}
+
+function formatOverrideCountdown(ms) {
+  if (ms == null) {
+    return '--:--';
+  }
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
 }
 
 function formatHistoryTimestamp(value) {
@@ -952,7 +1047,7 @@ function applySchedulerConfig(payload, options = {}) {
   const shouldUpdateForm = !state.schedulerDirty || options.forceFormUpdate;
   if (shouldUpdateForm) {
     nextState.schedulerForm = {
-      enabled: Boolean(payload?.enabled),
+      enabled: undefined,
       latitude: payload?.latitude == null ? '' : String(payload.latitude),
       longitude: payload?.longitude == null ? '' : String(payload.longitude),
       sunriseOffsetMinutes:
@@ -966,6 +1061,12 @@ function applySchedulerConfig(payload, options = {}) {
     nextState.status = { ...state.status, scheduler: payload };
   }
   setState(nextState);
+  const persistedLat = Number(payload?.latitude);
+  const persistedLon = Number(payload?.longitude);
+  if (Number.isFinite(persistedLat) && Number.isFinite(persistedLon)) {
+    persistSchedulerCoords({ latitude: persistedLat, longitude: persistedLon });
+  }
+  syncOverrideCountdownFromStatus(payload?.override);
 }
 
 async function fetchSchedulerConfig(force = false) {
@@ -1004,7 +1105,13 @@ function updateSchedulerFormField(field, value) {
 
 function buildSchedulerPayload() {
   const form = state.schedulerForm ?? {};
-  const enabled = form.enabled === true || form.enabled === 'true';
+  const formEnabledValue = form.enabled;
+  const enabled =
+    formEnabledValue === undefined ||
+    formEnabledValue === null ||
+    formEnabledValue === ''
+      ? Boolean(state.schedulerStatus?.enabled)
+      : formEnabledValue === true || formEnabledValue === 'true';
   const latitude = parseFloat(form.latitude);
   const longitude = parseFloat(form.longitude);
   const sunriseOffset = parseInt(form.sunriseOffsetMinutes, 10);
@@ -1268,6 +1375,7 @@ function applyStatus(payload) {
     initialized: true
   });
   syncCountdownFromStatus();
+  syncOverrideCountdownFromStatus(payload?.scheduler?.override);
 }
 
 function updateDoorStatus(doorPayload, options = {}) {
@@ -1326,6 +1434,47 @@ function stopCountdownLoop() {
   if (countdownTimerId) {
     clearInterval(countdownTimerId);
     countdownTimerId = null;
+  }
+}
+
+function syncOverrideCountdownFromStatus(overrideSource) {
+  const overrideData =
+    overrideSource ??
+    state.status?.scheduler?.override ??
+    state.schedulerStatus?.override;
+  if (overrideData?.active && Number.isFinite(overrideData.remainingSeconds)) {
+    const ms = Math.max(0, overrideData.remainingSeconds * 1000);
+    setState({ overrideMs: ms });
+    startOverrideCountdownLoop();
+  } else {
+    if (state.overrideMs != null) {
+      setState({ overrideMs: null });
+    }
+    stopOverrideCountdownLoop();
+  }
+}
+
+function startOverrideCountdownLoop() {
+  if (overrideTimerId) {
+    return;
+  }
+  overrideTimerId = setInterval(() => {
+    if (state.overrideMs == null) {
+      stopOverrideCountdownLoop();
+      return;
+    }
+    const nextValue = Math.max(0, state.overrideMs - 1000);
+    setState({ overrideMs: nextValue });
+    if (nextValue === 0) {
+      stopOverrideCountdownLoop();
+    }
+  }, 1000);
+}
+
+function stopOverrideCountdownLoop() {
+  if (overrideTimerId) {
+    clearInterval(overrideTimerId);
+    overrideTimerId = null;
   }
 }
 
@@ -1509,7 +1658,12 @@ if (elements.schedulerForm) {
 }
 if (elements.schedulerEnabledSelect) {
   elements.schedulerEnabledSelect.addEventListener('change', (event) => {
-    const enabled = event.target.value === 'true';
+    const value = event.target.value;
+    if (!value) {
+      updateSchedulerFormField('enabled', undefined);
+      return;
+    }
+    const enabled = value === 'true';
     updateSchedulerFormField('enabled', enabled);
   });
 }
@@ -1670,4 +1824,5 @@ window.addEventListener('beforeunload', () => {
   clearInterval(clockTimer);
   clearInterval(historyPollTimer);
   stopCountdownLoop();
+  stopOverrideCountdownLoop();
 });
