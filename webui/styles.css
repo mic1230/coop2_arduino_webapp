@@ -481,6 +481,14 @@ button.action-button.active-action {
   font-size: 1rem;
 }
 
+.settings-form input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
 .timezone-section {
   margin-top: 1.5rem;
   padding-top: 1.25rem;
@@ -608,6 +616,44 @@ button.action-button.active-action {
   color: var(--coop-muted);
   font-size: 0.85rem;
   margin-left: 0.5rem;
+}
+
+.scheduler-card .scheduler-summary,
+.scheduler-card .scheduler-history {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.scheduler-card .label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--coop-muted);
+}
+
+.scheduler-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.scheduler-actions .ghost {
+  margin-right: auto;
+}
+
+.scheduler-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.scheduler-toggle input[type="checkbox"] {
+  width: 1.25rem;
+  height: 1.25rem;
+  accent-color: #1d4ed8;
 }
 
 @media (max-width: 640px) {

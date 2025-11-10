@@ -15,6 +15,9 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <string>
+#include <sstream>
+#include <cmath>
 
 #include "web_assets.h"
 
@@ -89,7 +92,7 @@ constexpr uint8_t RELAY_CLOSE_PIN = 5;  // Relay that drives the CLOSE direction
 constexpr uint32_t DOOR_TRAVEL_TIME_MS = 5000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
-constexpr bool TEST_MODE = true;  // When true, relays are not driven; logs only.
+constexpr bool TEST_MODE = false;  // When true, relays are not driven; logs only.
 constexpr bool SERIAL_HEARTBEAT_ENABLED = false;
 constexpr bool VERBOSE_LOGS = false;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
@@ -114,6 +117,51 @@ constexpr uint32_t DOOR_HISTORY_HOURLY_SECONDS = 60 * 60;
 constexpr const char *DOOR_HISTORY_CSV_HEADER =
     "timestamp,display_time,door_state,battery_temp_c,greenhouse_temp_c,battery_voltage,event\n";
 constexpr const char *DOOR_HISTORY_CSV_TEMP_PATH = "/door_history.tmp";
+
+//==============================================================================
+// Solar automation + device metadata (ported from radon thermostat patterns)
+//==============================================================================
+constexpr const char *SOLAR_CONFIG_PATH = "/solar_scheduler.json";
+constexpr bool SOLAR_AUTOMATION_DEFAULT_ENABLED = false;
+constexpr float DEFAULT_LATITUDE = 41.505f;
+constexpr float DEFAULT_LONGITUDE = -81.690f;
+constexpr int DEFAULT_SUNRISE_OFFSET_MIN = -15;
+constexpr int DEFAULT_SUNSET_OFFSET_MIN = 30;
+constexpr float MIN_LATITUDE = -89.0f;
+constexpr float MAX_LATITUDE = 89.0f;
+constexpr float MIN_LONGITUDE = -180.0f;
+constexpr float MAX_LONGITUDE = 180.0f;
+constexpr float SOLAR_ZENITH = 90.833f;
+constexpr double DEG_TO_RAD_D = 0.0174532925199432957692;
+constexpr double RAD_TO_DEG_D = 57.295779513082320876798;
+constexpr int MIN_SUN_OFFSET_MINUTES = -720;
+constexpr int MAX_SUN_OFFSET_MINUTES = 720;
+constexpr int AVAILABLE_GPIO_PINS[] = {2,  4,  5,  12, 13, 14, 15, 16, 17, 18,
+                                       19, 21, 22, 23, 25, 26, 27, 32, 33};
+constexpr size_t AVAILABLE_GPIO_PIN_COUNT = sizeof(AVAILABLE_GPIO_PINS) / sizeof(int);
+constexpr char PREF_KEY_SCHED_OPEN_DAY[] = "sched_open_day";
+constexpr char PREF_KEY_SCHED_CLOSE_DAY[] = "sched_close_day";
+constexpr char PREF_KEY_SCHED_OPEN_TS[] = "sched_open_ts";
+constexpr char PREF_KEY_SCHED_CLOSE_TS[] = "sched_close_ts";
+
+struct SolarScheduleConfig {
+  bool enabled = SOLAR_AUTOMATION_DEFAULT_ENABLED;
+  float latitude = DEFAULT_LATITUDE;
+  float longitude = DEFAULT_LONGITUDE;
+  int sunriseOffsetMinutes = DEFAULT_SUNRISE_OFFSET_MIN;
+  int sunsetOffsetMinutes = DEFAULT_SUNSET_OFFSET_MIN;
+};
+
+struct SolarScheduleRuntime {
+  SolarScheduleConfig config;
+  bool dirty = true;
+  bool timesValid = false;
+  uint16_t computedDay = 0;
+  time_t sunriseUtc = 0;
+  time_t sunsetUtc = 0;
+  time_t sunriseActionUtc = 0;
+  time_t sunsetActionUtc = 0;
+};
 
 struct TimezoneOption {
   const char *id;
@@ -194,6 +242,21 @@ bool rewriteDoorHistoryCsvDisplayTimes();
 void applyTimezoneOption(const TimezoneOption &option);
 bool waitForSerial(uint32_t timeoutMs = SERIAL_WAIT_TIMEOUT_MS);
 void updateSerialAttachmentAnnounce();
+bool loadSolarScheduleConfig();
+bool saveSolarScheduleConfig(const SolarScheduleConfig &config);
+void loadSolarScheduleExecutionState();
+void persistSolarExecutionState();
+void markSolarScheduleDirty();
+void resetSolarScheduleRuntime();
+bool ensureSolarScheduleTimes(time_t nowUtc);
+void updateSolarScheduler();
+uint16_t localDayOfYear(time_t ts);
+std::string availablePinsCsv();
+void addAvailablePins(ArduinoJson::JsonArray arr);
+String chipDescriptor();
+String solarSchedulerStatusToJson(bool includeDeviceMeta = false);
+void handleSolarScheduleStatus();
+void handleSolarScheduleUpdate();
 
 WebServer apiServer(80);
 bool apiServerEnabled = false;
@@ -263,6 +326,11 @@ struct DoorHistoryEntry {
 };
 
 std::vector<DoorHistoryEntry> doorHistoryEntries;
+SolarScheduleRuntime solarSchedule;
+uint16_t lastSunriseCommandDay = 0;
+uint16_t lastSunsetCommandDay = 0;
+time_t lastSunriseCommandTs = 0;
+time_t lastSunsetCommandTs = 0;
 bool fileSystemReady = false;
 time_t lastHourlyBucket = 0;
 bool clockSynchronized = false;
@@ -402,6 +470,47 @@ void setRelayState(uint8_t pin, bool active) {
 void stopAllRelays() {
   setRelayState(RELAY_OPEN_PIN, false);
   setRelayState(RELAY_CLOSE_PIN, false);
+}
+
+bool isSupportedGpio(int pin) {
+  for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+    if (AVAILABLE_GPIO_PINS[idx] == pin) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string availablePinsCsv() {
+  std::ostringstream oss;
+  for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+    if (idx > 0) {
+      oss << ", ";
+    }
+    oss << AVAILABLE_GPIO_PINS[idx];
+  }
+  return oss.str();
+}
+
+void addAvailablePins(ArduinoJson::JsonArray arr) {
+  for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+    arr.add(AVAILABLE_GPIO_PINS[idx]);
+  }
+}
+
+String chipDescriptor() {
+  std::ostringstream oss;
+  oss << ESP.getChipModel();
+  const int revision = ESP.getChipRevision();
+  if (revision >= 0) {
+    oss << " rev " << revision;
+  }
+  oss << " (" << ESP.getChipCores() << " cores)";
+#ifdef ARDUINO_VARIANT
+  oss << " / " << ARDUINO_VARIANT;
+#endif
+  const std::string text = oss.str();
+  return String(text.c_str());
 }
 
 bool beginDoorMotion(DoorMotion motion) {
@@ -666,6 +775,7 @@ const TimezoneOption *findTimezoneOption(const String &timezoneId) {
 void applyTimezoneOption(const TimezoneOption &option) {
   activeTimezoneId = option.id;
   activeTimezoneOffsetMinutes = option.offsetMinutes;
+  markSolarScheduleDirty();
 }
 
 void loadTimezonePreference() {
@@ -693,6 +803,289 @@ bool persistTimezonePreference(const String &timezoneId) {
   }
   doorPrefs.putString(PREF_KEY_TIMEZONE_ID, timezoneId);
   return true;
+}
+
+float clampFloat(float value, float minValue, float maxValue) {
+  if (value < minValue) {
+    return minValue;
+  }
+  if (value > maxValue) {
+    return maxValue;
+  }
+  return value;
+}
+
+void resetSolarScheduleRuntime() {
+  solarSchedule.sunriseUtc = 0;
+  solarSchedule.sunsetUtc = 0;
+  solarSchedule.sunriseActionUtc = 0;
+  solarSchedule.sunsetActionUtc = 0;
+  solarSchedule.computedDay = 0;
+  solarSchedule.timesValid = false;
+}
+
+void markSolarScheduleDirty() {
+  solarSchedule.dirty = true;
+  resetSolarScheduleRuntime();
+}
+
+bool loadSolarScheduleConfig() {
+  SolarScheduleConfig defaults;
+  solarSchedule.config = defaults;
+  markSolarScheduleDirty();
+  if (!ensureFileSystem() || !LittleFS.exists(SOLAR_CONFIG_PATH)) {
+    Serial.println("Solar scheduler config missing; defaults applied.");
+    return false;
+  }
+  File file = LittleFS.open(SOLAR_CONFIG_PATH, "r");
+  if (!file) {
+    Serial.println("Failed to open solar scheduler config.");
+    return false;
+  }
+  StaticJsonDocument<256> doc;
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    Serial.printf("Solar config parse failed: %s\n", error.c_str());
+    return false;
+  }
+  SolarScheduleConfig loaded;
+  loaded.enabled = doc["enabled"] | SOLAR_AUTOMATION_DEFAULT_ENABLED;
+  loaded.latitude = doc["latitude"] | DEFAULT_LATITUDE;
+  loaded.longitude = doc["longitude"] | DEFAULT_LONGITUDE;
+  loaded.sunriseOffsetMinutes = doc["sunriseOffsetMinutes"] | DEFAULT_SUNRISE_OFFSET_MIN;
+  loaded.sunsetOffsetMinutes = doc["sunsetOffsetMinutes"] | DEFAULT_SUNSET_OFFSET_MIN;
+  if (!std::isfinite(loaded.latitude)) {
+    loaded.latitude = DEFAULT_LATITUDE;
+  }
+  if (!std::isfinite(loaded.longitude)) {
+    loaded.longitude = DEFAULT_LONGITUDE;
+  }
+  loaded.latitude = clampFloat(loaded.latitude, MIN_LATITUDE, MAX_LATITUDE);
+  loaded.longitude = clampFloat(loaded.longitude, MIN_LONGITUDE, MAX_LONGITUDE);
+  if (loaded.sunriseOffsetMinutes < MIN_SUN_OFFSET_MINUTES) {
+    loaded.sunriseOffsetMinutes = MIN_SUN_OFFSET_MINUTES;
+  } else if (loaded.sunriseOffsetMinutes > MAX_SUN_OFFSET_MINUTES) {
+    loaded.sunriseOffsetMinutes = MAX_SUN_OFFSET_MINUTES;
+  }
+  if (loaded.sunsetOffsetMinutes < MIN_SUN_OFFSET_MINUTES) {
+    loaded.sunsetOffsetMinutes = MIN_SUN_OFFSET_MINUTES;
+  } else if (loaded.sunsetOffsetMinutes > MAX_SUN_OFFSET_MINUTES) {
+    loaded.sunsetOffsetMinutes = MAX_SUN_OFFSET_MINUTES;
+  }
+  solarSchedule.config = loaded;
+  Serial.printf("Solar scheduler config loaded: enabled=%s lat=%.4f lon=%.4f sunriseOffset=%d sunsetOffset=%d\n",
+                solarSchedule.config.enabled ? "true" : "false", solarSchedule.config.latitude,
+                solarSchedule.config.longitude, solarSchedule.config.sunriseOffsetMinutes,
+                solarSchedule.config.sunsetOffsetMinutes);
+  return true;
+}
+
+bool saveSolarScheduleConfig(const SolarScheduleConfig &config) {
+  if (!ensureFileSystem()) {
+    return false;
+  }
+  StaticJsonDocument<256> doc;
+  doc["enabled"] = config.enabled;
+  doc["latitude"] = config.latitude;
+  doc["longitude"] = config.longitude;
+  doc["sunriseOffsetMinutes"] = config.sunriseOffsetMinutes;
+  doc["sunsetOffsetMinutes"] = config.sunsetOffsetMinutes;
+  File file = LittleFS.open(SOLAR_CONFIG_PATH, "w");
+  if (!file) {
+    Serial.println("Failed to open solar scheduler config for writing.");
+    return false;
+  }
+  const size_t written = serializeJson(doc, file);
+  file.close();
+  if (written == 0) {
+    Serial.println("Solar scheduler config write produced no data.");
+    return false;
+  }
+  Serial.println("Solar scheduler config saved.");
+  return true;
+}
+
+void loadSolarScheduleExecutionState() {
+  if (!initDoorPreferences()) {
+    return;
+  }
+  lastSunriseCommandDay = doorPrefs.getUShort(PREF_KEY_SCHED_OPEN_DAY, 0);
+  lastSunsetCommandDay = doorPrefs.getUShort(PREF_KEY_SCHED_CLOSE_DAY, 0);
+  lastSunriseCommandTs = static_cast<time_t>(doorPrefs.getULong(PREF_KEY_SCHED_OPEN_TS, 0));
+  lastSunsetCommandTs = static_cast<time_t>(doorPrefs.getULong(PREF_KEY_SCHED_CLOSE_TS, 0));
+}
+
+void persistSolarExecutionState() {
+  if (!initDoorPreferences()) {
+    return;
+  }
+  doorPrefs.putUShort(PREF_KEY_SCHED_OPEN_DAY, lastSunriseCommandDay);
+  doorPrefs.putUShort(PREF_KEY_SCHED_CLOSE_DAY, lastSunsetCommandDay);
+  doorPrefs.putULong(PREF_KEY_SCHED_OPEN_TS, static_cast<uint32_t>(lastSunriseCommandTs));
+  doorPrefs.putULong(PREF_KEY_SCHED_CLOSE_TS, static_cast<uint32_t>(lastSunsetCommandTs));
+}
+
+uint16_t localDayOfYear(time_t ts) {
+  if (ts <= 0) {
+    return 0;
+  }
+  struct tm localTm;
+  if (!localtime_r(&ts, &localTm)) {
+    return 0;
+  }
+  return static_cast<uint16_t>(localTm.tm_yday + 1);
+}
+
+bool computeSolarEventUtc(bool sunrise, time_t referenceUtc, const SolarScheduleConfig &config,
+                          time_t &eventUtcOut) {
+  if (referenceUtc <= 0) {
+    return false;
+  }
+  struct tm localTm;
+  if (!localtime_r(&referenceUtc, &localTm)) {
+    return false;
+  }
+  const double dayOfYear = static_cast<double>(localTm.tm_yday + 1);
+  const double longitudeHour = static_cast<double>(config.longitude) / 15.0;
+  const double t = sunrise ? (dayOfYear + ((6.0 - longitudeHour) / 24.0))
+                           : (dayOfYear + ((18.0 - longitudeHour) / 24.0));
+  double M = (0.9856 * t) - 3.289;
+  double L = M + (1.916 * std::sin(DEG_TO_RAD_D * M)) + (0.020 * std::sin(2.0 * DEG_TO_RAD_D * M)) + 282.634;
+  L = std::fmod(L, 360.0);
+  if (L < 0) {
+    L += 360.0;
+  }
+  double RA = RAD_TO_DEG_D * std::atan(0.91764 * std::tan(DEG_TO_RAD_D * L));
+  RA = std::fmod(RA, 360.0);
+  if (RA < 0) {
+    RA += 360.0;
+  }
+  const double Lquadrant = std::floor(L / 90.0) * 90.0;
+  const double RAquadrant = std::floor(RA / 90.0) * 90.0;
+  RA = RA + (Lquadrant - RAquadrant);
+  RA /= 15.0;
+  const double sinDec = 0.39782 * std::sin(DEG_TO_RAD_D * L);
+  const double cosDec = std::cos(std::asin(sinDec));
+  const double cosH =
+      (std::cos(DEG_TO_RAD_D * SOLAR_ZENITH) - (sinDec * std::sin(DEG_TO_RAD_D * config.latitude))) /
+      (cosDec * std::cos(DEG_TO_RAD_D * config.latitude));
+  if (cosH > 1.0 || cosH < -1.0) {
+    return false;
+  }
+  double H = sunrise ? (360.0 - RAD_TO_DEG_D * std::acos(cosH)) : (RAD_TO_DEG_D * std::acos(cosH));
+  H /= 15.0;
+  const double T = H + RA - (0.06571 * t) - 6.622;
+  double UT = T - longitudeHour;
+  while (UT < 0.0) {
+    UT += 24.0;
+  }
+  while (UT >= 24.0) {
+    UT -= 24.0;
+  }
+  const double timezoneHours = static_cast<double>(activeTimezoneOffsetMinutes) / 60.0;
+  double localHours = UT + timezoneHours;
+  int dayAdjustment = 0;
+  while (localHours < 0.0) {
+    localHours += 24.0;
+    --dayAdjustment;
+  }
+  while (localHours >= 24.0) {
+    localHours -= 24.0;
+    ++dayAdjustment;
+  }
+  struct tm midnightLocal = localTm;
+  midnightLocal.tm_hour = 0;
+  midnightLocal.tm_min = 0;
+  midnightLocal.tm_sec = 0;
+  time_t midnightEpoch = mktime(&midnightLocal);
+  if (midnightEpoch == -1) {
+    return false;
+  }
+  midnightEpoch += static_cast<time_t>(dayAdjustment) * 24 * 60 * 60;
+  const double seconds = localHours * 3600.0;
+  eventUtcOut = midnightEpoch + static_cast<time_t>(seconds);
+  return true;
+}
+
+bool ensureSolarScheduleTimes(time_t nowUtc) {
+  if (!solarSchedule.config.enabled) {
+    return false;
+  }
+  const uint16_t day = localDayOfYear(nowUtc);
+  if (day == 0) {
+    return false;
+  }
+  if (solarSchedule.dirty || !solarSchedule.timesValid || solarSchedule.computedDay != day) {
+    time_t sunriseUtc = 0;
+    time_t sunsetUtc = 0;
+    if (!computeSolarEventUtc(true, nowUtc, solarSchedule.config, sunriseUtc) ||
+        !computeSolarEventUtc(false, nowUtc, solarSchedule.config, sunsetUtc)) {
+      solarSchedule.timesValid = false;
+      solarSchedule.dirty = false;
+      return false;
+    }
+    const long sunriseOffsetSeconds =
+        static_cast<long>(solarSchedule.config.sunriseOffsetMinutes) * 60L;
+    const long sunsetOffsetSeconds =
+        static_cast<long>(solarSchedule.config.sunsetOffsetMinutes) * 60L;
+    solarSchedule.sunriseUtc = sunriseUtc;
+    solarSchedule.sunsetUtc = sunsetUtc;
+    solarSchedule.sunriseActionUtc = sunriseUtc + sunriseOffsetSeconds;
+    solarSchedule.sunsetActionUtc = sunsetUtc + sunsetOffsetSeconds;
+    solarSchedule.computedDay = day;
+    solarSchedule.timesValid = true;
+    solarSchedule.dirty = false;
+    Serial.printf("Solar scheduler recalculated for day %u (sunrise action=%lld, sunset action=%lld)\n",
+                  static_cast<unsigned>(day),
+                  static_cast<long long>(solarSchedule.sunriseActionUtc),
+                  static_cast<long long>(solarSchedule.sunsetActionUtc));
+  }
+  return solarSchedule.timesValid;
+}
+
+void updateSolarScheduler() {
+  if (!solarSchedule.config.enabled) {
+    return;
+  }
+  const time_t nowTs = currentTimestamp();
+  if (nowTs == 0) {
+    return;
+  }
+  if (!ensureSolarScheduleTimes(nowTs)) {
+    return;
+  }
+  if (doorMotion.motion != DoorMotion::Idle) {
+    return;
+  }
+  const uint16_t today = localDayOfYear(nowTs);
+  if (today == 0) {
+    return;
+  }
+  auto triggerAction = [&](bool sunrise) {
+    time_t targetTs = sunrise ? solarSchedule.sunriseActionUtc : solarSchedule.sunsetActionUtc;
+    uint16_t *lastDay = sunrise ? &lastSunriseCommandDay : &lastSunsetCommandDay;
+    time_t *lastTs = sunrise ? &lastSunriseCommandTs : &lastSunsetCommandTs;
+    const char *label = sunrise ? "open" : "close";
+    if (targetTs == 0 || nowTs < targetTs) {
+      return;
+    }
+    if (*lastDay == today) {
+      return;
+    }
+    DoorCommandResult result = sunrise ? openDoor() : closeDoor();
+    if (result == DoorCommandResult::Accepted || result == DoorCommandResult::AlreadyAtTarget) {
+      *lastDay = today;
+      *lastTs = nowTs;
+      persistSolarExecutionState();
+      Serial.printf("Solar scheduler %s action result=%s\n", label, doorCommandResultToString(result));
+      if (result == DoorCommandResult::AlreadyAtTarget) {
+        recordDoorHistory(sunrise ? "scheduler_open_skip" : "scheduler_close_skip");
+      }
+    }
+  };
+  triggerAction(true);
+  triggerAction(false);
 }
 
 String formatHistoryTimestamp(time_t ts) {
@@ -1164,6 +1557,102 @@ String wifiStatusToJson() {
   return json;
 }
 
+String solarSchedulerStatusToJson(bool includeDeviceMeta) {
+  const time_t nowTs = currentTimestamp();
+  if (nowTs > 0 && solarSchedule.config.enabled) {
+    ensureSolarScheduleTimes(nowTs);
+  }
+  const bool enabled = solarSchedule.config.enabled;
+  const bool timesValid = enabled && solarSchedule.timesValid;
+  const uint16_t today = nowTs > 0 ? localDayOfYear(nowTs) : 0;
+  const bool sunriseDone = today != 0 && today == lastSunriseCommandDay;
+  const bool sunsetDone = today != 0 && today == lastSunsetCommandDay;
+  const bool sunriseUpcoming = timesValid && !sunriseDone && solarSchedule.sunriseActionUtc >= nowTs;
+  const bool sunsetUpcoming = timesValid && !sunsetDone && solarSchedule.sunsetActionUtc >= nowTs;
+  const char *nextAction = nullptr;
+  time_t nextActionTs = 0;
+  if (sunriseUpcoming &&
+      (!sunsetUpcoming || solarSchedule.sunriseActionUtc <= solarSchedule.sunsetActionUtc)) {
+    nextAction = "open";
+    nextActionTs = solarSchedule.sunriseActionUtc;
+  } else if (sunsetUpcoming) {
+    nextAction = "close";
+    nextActionTs = solarSchedule.sunsetActionUtc;
+  } else if (timesValid) {
+    if (!sunriseDone) {
+      nextAction = "open";
+      nextActionTs = solarSchedule.sunriseActionUtc;
+    } else if (!sunsetDone) {
+      nextAction = "close";
+      nextActionTs = solarSchedule.sunsetActionUtc;
+    }
+  }
+
+  String json;
+  json.reserve(includeDeviceMeta ? 512 : 320);
+  json += F("{\"enabled\":");
+  json += enabled ? F("true") : F("false");
+  json += F(",\"latitude\":");
+  json += String(solarSchedule.config.latitude, 6);
+  json += F(",\"longitude\":");
+  json += String(solarSchedule.config.longitude, 6);
+  json += F(",\"sunriseOffsetMinutes\":");
+  json += String(solarSchedule.config.sunriseOffsetMinutes);
+  json += F(",\"sunsetOffsetMinutes\":");
+  json += String(solarSchedule.config.sunsetOffsetMinutes);
+  json += F(",\"timesValid\":");
+  json += timesValid ? F("true") : F("false");
+  json += F(",\"computedDay\":");
+  if (solarSchedule.computedDay > 0) {
+    json += String(solarSchedule.computedDay);
+  } else {
+    json += F("null");
+  }
+  auto appendTs = [&](time_t value, bool allow) {
+    if (allow && value > 0) {
+      json += String(static_cast<unsigned long>(value));
+    } else {
+      json += F("null");
+    }
+  };
+  json += F(",\"sunriseTime\":");
+  appendTs(solarSchedule.sunriseUtc, timesValid);
+  json += F(",\"sunsetTime\":");
+  appendTs(solarSchedule.sunsetUtc, timesValid);
+  json += F(",\"sunriseActionTime\":");
+  appendTs(solarSchedule.sunriseActionUtc, timesValid);
+  json += F(",\"sunsetActionTime\":");
+  appendTs(solarSchedule.sunsetActionUtc, timesValid);
+  json += F(",\"nextAction\":");
+  if (nextAction) {
+    json += '"';
+    json += nextAction;
+    json += '"';
+  } else {
+    json += F("null");
+  }
+  json += F(",\"nextActionTime\":");
+  appendTs(nextActionTs, nextAction != nullptr);
+  json += F(",\"lastOpenAction\":");
+  appendTs(lastSunriseCommandTs, lastSunriseCommandTs > 0);
+  json += F(",\"lastCloseAction\":");
+  appendTs(lastSunsetCommandTs, lastSunsetCommandTs > 0);
+  if (includeDeviceMeta) {
+    json += F(",\"availablePins\":[");
+    for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+      if (idx > 0) {
+        json += ',';
+      }
+      json += String(AVAILABLE_GPIO_PINS[idx]);
+    }
+    json += F("],\"device\":\"");
+    json += escapeJson(chipDescriptor());
+    json += F("\"");
+  }
+  json += F("}");
+  return json;
+}
+
 void sendCorsHeaders() {
   apiServer.sendHeader(F("Access-Control-Allow-Origin"), F("*"));
   apiServer.sendHeader(F("Access-Control-Allow-Methods"), F("GET,POST,OPTIONS"));
@@ -1183,7 +1672,8 @@ void handleOptions() {
 void handleApiRoot() {
   String json =
       F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
-        "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/history.csv\"]}");
+        "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/api/schedule\","
+        "\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -1277,13 +1767,15 @@ void handleStatusEndpoint() {
   const DoorState state = getDoorPosition();
   const SensorReadings readings = getSensorReadings();
   String json;
-  json.reserve(320);
+  json.reserve(480);
   json += F("{\"door\":");
   json += doorStatusToJson(state);
   json += F(",\"sensors\":");
   json += sensorReadingsToJson(readings);
   json += F(",\"wifi\":");
   json += wifiStatusToJson();
+  json += F(",\"scheduler\":");
+  json += solarSchedulerStatusToJson(false);
   json += F("}");
   sendJsonResponse(200, json);
 }
@@ -1481,6 +1973,94 @@ void handleTimezoneUpdate() {
   sendJsonResponse(200, json);
 }
 
+void handleSolarScheduleStatus() {
+  sendJsonResponse(200, solarSchedulerStatusToJson(true));
+}
+
+void handleSolarScheduleUpdate() {
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  StaticJsonDocument<256> doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
+    return;
+  }
+  SolarScheduleConfig next = solarSchedule.config;
+  bool changed = false;
+  if (doc.containsKey("enabled")) {
+    const bool requested = doc["enabled"].as<bool>();
+    if (requested != next.enabled) {
+      next.enabled = requested;
+      changed = true;
+    }
+  }
+  if (doc.containsKey("latitude")) {
+    float lat = doc["latitude"].as<float>();
+    if (!std::isfinite(lat)) {
+      sendJsonResponse(400, F("{\"error\":\"invalid_latitude\"}"));
+      return;
+    }
+    lat = clampFloat(lat, MIN_LATITUDE, MAX_LATITUDE);
+    if (std::fabs(lat - next.latitude) > 0.0001f) {
+      next.latitude = lat;
+      changed = true;
+    }
+  }
+  if (doc.containsKey("longitude")) {
+    float lon = doc["longitude"].as<float>();
+    if (!std::isfinite(lon)) {
+      sendJsonResponse(400, F("{\"error\":\"invalid_longitude\"}"));
+      return;
+    }
+    lon = clampFloat(lon, MIN_LONGITUDE, MAX_LONGITUDE);
+    if (std::fabs(lon - next.longitude) > 0.0001f) {
+      next.longitude = lon;
+      changed = true;
+    }
+  }
+  auto parseOffset = [&](const char *field, int &target) -> bool {
+    if (!doc.containsKey(field)) {
+      return true;
+    }
+    int value = doc[field].as<int>();
+    if (value < MIN_SUN_OFFSET_MINUTES || value > MAX_SUN_OFFSET_MINUTES) {
+      return false;
+    }
+    if (value != target) {
+      target = value;
+      changed = true;
+    }
+    return true;
+  };
+  if (!parseOffset("sunriseOffsetMinutes", next.sunriseOffsetMinutes)) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_sunrise_offset\"}"));
+    return;
+  }
+  if (!parseOffset("sunsetOffsetMinutes", next.sunsetOffsetMinutes)) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_sunset_offset\"}"));
+    return;
+  }
+  if (!changed) {
+    sendJsonResponse(200, solarSchedulerStatusToJson(true));
+    return;
+  }
+  if (!saveSolarScheduleConfig(next)) {
+    sendJsonResponse(500, F("{\"error\":\"save_failed\"}"));
+    return;
+  }
+  solarSchedule.config = next;
+  markSolarScheduleDirty();
+  sendJsonResponse(200, solarSchedulerStatusToJson(true));
+}
+
 void announceConfigPortalStatus(bool force) {
   if (!configPortalActive) {
     return;
@@ -1630,6 +2210,9 @@ void startApiServer() {
   apiServer.on("/api/timezone", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/timezone", HTTP_GET, handleTimezoneStatus);
   apiServer.on("/api/timezone", HTTP_POST, handleTimezoneUpdate);
+  apiServer.on("/api/schedule", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/schedule", HTTP_GET, handleSolarScheduleStatus);
+  apiServer.on("/api/schedule", HTTP_POST, handleSolarScheduleUpdate);
   apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
@@ -1655,6 +2238,8 @@ void setup() {
 
   initDoorHardware();
   ensureFileSystem();
+  loadSolarScheduleConfig();
+  loadSolarScheduleExecutionState();
   loadTimezonePreference();
   initWifiPreferences();
   if (!retainWifiCredentialsAfterReboot) {
@@ -1688,6 +2273,7 @@ void setup() {
 void loop() {
   updateSerialAttachmentAnnounce();
   updateDoorMotion();
+  updateSolarScheduler();
   maybeRecordHourlyHistory();
   announceConfigPortalStatus();
   // Heartbeat: emit a short line every second when a serial console is attached
@@ -1900,6 +2486,7 @@ void syncClock() {
     if (getLocalTime(&timeinfo, 5000)) {
       clockSynchronized = true;
       Serial.println("Time synchronized via NTP.");
+      markSolarScheduleDirty();
       return;
     }
     delay(500);

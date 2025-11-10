@@ -4,6 +4,12 @@ const DEFAULT_DOOR_TRAVEL_TIME_MS = 50000;
 const DEFAULT_POMODORO_LENGTH_MS = DEFAULT_DOOR_TRAVEL_TIME_MS;
 const HISTORY_POLL_INTERVAL_MS = 15000;
 const HISTORY_DISPLAY_LIMIT = 30;
+const DEFAULT_LATITUDE = 41.505;
+const DEFAULT_LONGITUDE = -81.69;
+const DEFAULT_SUNRISE_OFFSET = -15;
+const DEFAULT_SUNSET_OFFSET = 30;
+const MIN_SUN_OFFSET = -720;
+const MAX_SUN_OFFSET = 720;
 const state = {
   status: null,
   loading: true,
@@ -37,7 +43,20 @@ const state = {
   timezoneError: '',
   timezoneMessage: '',
   timezoneUpdating: '',
-  timezonePickerOpen: false
+  timezonePickerOpen: false,
+  schedulerStatus: null,
+  schedulerLoading: false,
+  schedulerSaving: false,
+  schedulerMessage: '',
+  schedulerError: '',
+  schedulerForm: {
+    enabled: false,
+    latitude: String(DEFAULT_LATITUDE),
+    longitude: String(DEFAULT_LONGITUDE),
+    sunriseOffsetMinutes: String(DEFAULT_SUNRISE_OFFSET),
+    sunsetOffsetMinutes: String(DEFAULT_SUNSET_OFFSET)
+  },
+  schedulerDirty: false
 };
 
 let countdownTimerId = null;
@@ -92,7 +111,26 @@ const elements = {
   timezoneOptions: document.querySelector('[data-timezone-options]'),
   timezoneMessage: document.querySelector('[data-timezone-message]'),
   timezoneLabel: document.querySelector('[data-timezone-label]'),
-  timezoneOffset: document.querySelector('[data-timezone-offset]')
+  timezoneOffset: document.querySelector('[data-timezone-offset]'),
+  schedulerCard: document.querySelector('[data-scheduler-card]'),
+  schedulerEnabledChip: document.querySelector('[data-scheduler-enabled-chip]'),
+  schedulerNextAction: document.querySelector('[data-scheduler-next-action]'),
+  schedulerSunriseTime: document.querySelector('[data-scheduler-sunrise-time]'),
+  schedulerSunsetTime: document.querySelector('[data-scheduler-sunset-time]'),
+  schedulerOpenTime: document.querySelector('[data-scheduler-open-time]'),
+  schedulerCloseTime: document.querySelector('[data-scheduler-close-time]'),
+  schedulerLastOpen: document.querySelector('[data-scheduler-last-open]'),
+  schedulerLastClose: document.querySelector('[data-scheduler-last-close]'),
+  schedulerMessage: document.querySelector('[data-scheduler-message]'),
+  schedulerError: document.querySelector('[data-scheduler-error]'),
+  schedulerForm: document.querySelector('[data-scheduler-form]'),
+  schedulerEnabledInput: document.querySelector('[data-scheduler-enabled-input]'),
+  schedulerLatitudeInput: document.querySelector('[data-scheduler-latitude-input]'),
+  schedulerLongitudeInput: document.querySelector('[data-scheduler-longitude-input]'),
+  schedulerSunriseOffsetInput: document.querySelector('[data-scheduler-sunrise-offset-input]'),
+  schedulerSunsetOffsetInput: document.querySelector('[data-scheduler-sunset-offset-input]'),
+  schedulerSaveButton: document.querySelector('[data-scheduler-save]'),
+  schedulerRefreshButton: document.querySelector('[data-scheduler-refresh]')
 };
 
 function setState(patch) {
@@ -348,9 +386,46 @@ function render() {
     elements.wifiScanButton.disabled = !settingsActive || state.wifiScanLoading;
   }
 
+  const schedulerForm = state.schedulerForm ?? {};
+  const schedulerLocked = !settingsActive || state.schedulerLoading;
+  if (elements.schedulerEnabledInput) {
+    elements.schedulerEnabledInput.checked = Boolean(schedulerForm.enabled);
+    elements.schedulerEnabledInput.disabled = schedulerLocked;
+  }
+  if (elements.schedulerLatitudeInput) {
+    elements.schedulerLatitudeInput.value =
+      schedulerForm.latitude == null ? '' : String(schedulerForm.latitude);
+    elements.schedulerLatitudeInput.disabled = schedulerLocked;
+  }
+  if (elements.schedulerLongitudeInput) {
+    elements.schedulerLongitudeInput.value =
+      schedulerForm.longitude == null ? '' : String(schedulerForm.longitude);
+    elements.schedulerLongitudeInput.disabled = schedulerLocked;
+  }
+  if (elements.schedulerSunriseOffsetInput) {
+    elements.schedulerSunriseOffsetInput.value =
+      schedulerForm.sunriseOffsetMinutes == null ? '' : String(schedulerForm.sunriseOffsetMinutes);
+    elements.schedulerSunriseOffsetInput.disabled = schedulerLocked;
+  }
+  if (elements.schedulerSunsetOffsetInput) {
+    elements.schedulerSunsetOffsetInput.value =
+      schedulerForm.sunsetOffsetMinutes == null ? '' : String(schedulerForm.sunsetOffsetMinutes);
+    elements.schedulerSunsetOffsetInput.disabled = schedulerLocked;
+  }
+  if (elements.schedulerSaveButton) {
+    const canSave =
+      settingsActive && state.schedulerDirty && !state.schedulerSaving && !state.schedulerLoading;
+    elements.schedulerSaveButton.disabled = !canSave;
+    elements.schedulerSaveButton.textContent = state.schedulerSaving ? 'Saving...' : 'Save schedule';
+  }
+  if (elements.schedulerRefreshButton) {
+    elements.schedulerRefreshButton.disabled = state.schedulerLoading;
+  }
+
   renderWifiScanResults();
   renderDoorHistory();
   renderTimezonePicker();
+  renderSchedulerPanel();
 }
 
 function renderDoorHistory() {
@@ -491,6 +566,68 @@ function renderTimezonePicker() {
   }
 }
 
+function renderSchedulerPanel() {
+  if (!elements.schedulerCard) {
+    return;
+  }
+  const settingsActive = state.activeTab === 'settings';
+  elements.schedulerCard.hidden = !settingsActive;
+  if (!settingsActive) {
+    return;
+  }
+  const schedulerData = state.schedulerStatus ?? state.status?.scheduler ?? null;
+  const enabled =
+    schedulerData?.enabled ?? Boolean(state.schedulerForm?.enabled ?? schedulerData?.enabled);
+  if (elements.schedulerEnabledChip) {
+    elements.schedulerEnabledChip.textContent = enabled ? 'Automation enabled' : 'Automation disabled';
+    elements.schedulerEnabledChip.className = `chip ${enabled ? 'success' : 'warning'}`;
+  }
+  if (elements.schedulerNextAction) {
+    if (state.schedulerLoading) {
+      elements.schedulerNextAction.textContent = 'Calculating schedule...';
+    } else if (schedulerData?.nextAction && schedulerData?.nextActionTime) {
+      const action = schedulerData.nextAction === 'close' ? 'Close' : 'Open';
+      elements.schedulerNextAction.textContent =
+        `${action} at ${formatSchedulerTime(schedulerData.nextActionTime)}`;
+    } else {
+      elements.schedulerNextAction.textContent = 'No upcoming events scheduled today.';
+    }
+  }
+  if (elements.schedulerSunriseTime) {
+    elements.schedulerSunriseTime.textContent = formatSchedulerTime(schedulerData?.sunriseTime);
+  }
+  if (elements.schedulerSunsetTime) {
+    elements.schedulerSunsetTime.textContent = formatSchedulerTime(schedulerData?.sunsetTime);
+  }
+  if (elements.schedulerOpenTime) {
+    elements.schedulerOpenTime.textContent = formatSchedulerTime(schedulerData?.sunriseActionTime);
+  }
+  if (elements.schedulerCloseTime) {
+    elements.schedulerCloseTime.textContent = formatSchedulerTime(schedulerData?.sunsetActionTime);
+  }
+  if (elements.schedulerLastOpen) {
+    elements.schedulerLastOpen.textContent = formatSchedulerDateTime(schedulerData?.lastOpenAction);
+  }
+  if (elements.schedulerLastClose) {
+    elements.schedulerLastClose.textContent = formatSchedulerDateTime(schedulerData?.lastCloseAction);
+  }
+  if (elements.schedulerMessage) {
+    const showMessage = Boolean(state.schedulerMessage);
+    elements.schedulerMessage.hidden = !showMessage;
+    if (showMessage) {
+      elements.schedulerMessage.textContent = state.schedulerMessage;
+    }
+  }
+  if (elements.schedulerError) {
+    const errorText = state.schedulerError || (state.schedulerLoading ? 'Loading schedule...' : '');
+    const showError = Boolean(errorText);
+    elements.schedulerError.hidden = !showError;
+    if (showError) {
+      elements.schedulerError.textContent = errorText;
+    }
+  }
+}
+
 function formatCurrentTime(date) {
   return date ? date.toLocaleTimeString() : '--';
 }
@@ -556,6 +693,28 @@ function formatTimezoneOffset(minutes) {
     .padStart(2, '0');
   const remainder = (absMinutes % 60).toString().padStart(2, '0');
   return `UTC${sign}${hours}:${remainder}`;
+}
+
+function formatSchedulerTime(value) {
+  if (typeof value !== 'number' || value <= 0) {
+    return '--';
+  }
+  const date = new Date(value * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return '--';
+  }
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatSchedulerDateTime(value) {
+  if (typeof value !== 'number' || value <= 0) {
+    return '--';
+  }
+  const date = new Date(value * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return '--';
+  }
+  return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function normalizeTimezoneConfig(payload) {
@@ -672,6 +831,141 @@ async function updateTimezoneSelection(timezoneId) {
   }
 }
 
+function applySchedulerConfig(payload, options = {}) {
+  const nextState = {
+    schedulerLoading: false,
+    schedulerError: '',
+    schedulerStatus: payload
+  };
+  const shouldUpdateForm = !state.schedulerDirty || options.forceFormUpdate;
+  if (shouldUpdateForm) {
+    nextState.schedulerForm = {
+      enabled: Boolean(payload?.enabled),
+      latitude: payload?.latitude == null ? '' : String(payload.latitude),
+      longitude: payload?.longitude == null ? '' : String(payload.longitude),
+      sunriseOffsetMinutes:
+        payload?.sunriseOffsetMinutes == null ? '' : String(payload.sunriseOffsetMinutes),
+      sunsetOffsetMinutes:
+        payload?.sunsetOffsetMinutes == null ? '' : String(payload.sunsetOffsetMinutes)
+    };
+    nextState.schedulerDirty = false;
+  }
+  if (state.status) {
+    nextState.status = { ...state.status, scheduler: payload };
+  }
+  setState(nextState);
+}
+
+async function fetchSchedulerConfig(force = false) {
+  if (state.schedulerLoading && !force) {
+    return;
+  }
+  setState({
+    schedulerLoading: true,
+    schedulerError: '',
+    schedulerMessage: ''
+  });
+  try {
+    const response = await fetch(buildEndpoint('/api/schedule'), { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Schedule request failed with HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    applySchedulerConfig(payload);
+  } catch (error) {
+    console.error(error);
+    setState({
+      schedulerLoading: false,
+      schedulerError: error?.message ?? 'Unable to load schedule.'
+    });
+  }
+}
+
+function updateSchedulerFormField(field, value) {
+  setState({
+    schedulerForm: { ...state.schedulerForm, [field]: value },
+    schedulerDirty: true,
+    schedulerMessage: '',
+    schedulerError: ''
+  });
+}
+
+function buildSchedulerPayload() {
+  const form = state.schedulerForm ?? {};
+  const latitude = parseFloat(form.latitude);
+  const longitude = parseFloat(form.longitude);
+  const sunriseOffset = parseInt(form.sunriseOffsetMinutes, 10);
+  const sunsetOffset = parseInt(form.sunsetOffsetMinutes, 10);
+  return {
+    enabled: Boolean(form.enabled),
+    latitude,
+    longitude,
+    sunriseOffsetMinutes: sunriseOffset,
+    sunsetOffsetMinutes: sunsetOffset
+  };
+}
+
+function validateSchedulerPayload(payload) {
+  if (!Number.isFinite(payload.latitude) || payload.latitude < -89 || payload.latitude > 89) {
+    throw new Error('Latitude must be between -89 and 89 degrees.');
+  }
+  if (!Number.isFinite(payload.longitude) || payload.longitude < -180 || payload.longitude > 180) {
+    throw new Error('Longitude must be between -180 and 180 degrees.');
+  }
+  if (!Number.isFinite(payload.sunriseOffsetMinutes) ||
+      payload.sunriseOffsetMinutes < MIN_SUN_OFFSET ||
+      payload.sunriseOffsetMinutes > MAX_SUN_OFFSET) {
+    throw new Error('Sunrise offset must stay within ±12 hours.');
+  }
+  if (!Number.isFinite(payload.sunsetOffsetMinutes) ||
+      payload.sunsetOffsetMinutes < MIN_SUN_OFFSET ||
+      payload.sunsetOffsetMinutes > MAX_SUN_OFFSET) {
+    throw new Error('Sunset offset must stay within ±12 hours.');
+  }
+}
+
+async function handleSchedulerSubmit(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (state.schedulerSaving || state.schedulerLoading) {
+    return;
+  }
+  let payload;
+  try {
+    payload = buildSchedulerPayload();
+    validateSchedulerPayload(payload);
+  } catch (validationError) {
+    setState({ schedulerError: validationError.message });
+    return;
+  }
+  setState({ schedulerSaving: true, schedulerError: '', schedulerMessage: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/schedule'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      cache: 'no-store'
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body?.error ?? `Schedule update failed with HTTP ${response.status}`);
+    }
+    applySchedulerConfig(body, { forceFormUpdate: true });
+    setState({
+      schedulerSaving: false,
+      schedulerDirty: false,
+      schedulerMessage: 'Schedule updated.'
+    });
+  } catch (error) {
+    console.error(error);
+    setState({
+      schedulerSaving: false,
+      schedulerError: error?.message ?? 'Unable to update schedule.'
+    });
+  }
+}
+
 function downloadHistoryCsv() {
   const timestamp = new Date().toISOString().replace(/[:]/g, '-').split('.')[0];
   const link = document.createElement('a');
@@ -697,6 +991,9 @@ function activateTab(tabName) {
   }
   if (tabName === 'settings' && !state.timezoneConfig && !state.timezoneLoading) {
     fetchTimezoneConfig();
+  }
+  if (tabName === 'settings' && !state.schedulerStatus && !state.schedulerLoading) {
+    fetchSchedulerConfig();
   }
 }
 
@@ -852,6 +1149,7 @@ async function fetchWifiScan() {
 function applyStatus(payload) {
   setState({
     status: payload,
+    schedulerStatus: payload?.scheduler ?? state.schedulerStatus,
     lastUpdated: new Date(),
     initialized: true
   });
@@ -1091,6 +1389,37 @@ if (elements.wifiScanResults) {
     const ssidValue = button.dataset.networkSsid ?? '';
     updateWifiFormField('ssid', ssidValue);
   });
+}
+if (elements.schedulerForm) {
+  elements.schedulerForm.addEventListener('submit', handleSchedulerSubmit);
+}
+if (elements.schedulerEnabledInput) {
+  elements.schedulerEnabledInput.addEventListener('change', (event) => {
+    updateSchedulerFormField('enabled', event.target.checked);
+  });
+}
+if (elements.schedulerLatitudeInput) {
+  elements.schedulerLatitudeInput.addEventListener('input', (event) => {
+    updateSchedulerFormField('latitude', event.target.value);
+  });
+}
+if (elements.schedulerLongitudeInput) {
+  elements.schedulerLongitudeInput.addEventListener('input', (event) => {
+    updateSchedulerFormField('longitude', event.target.value);
+  });
+}
+if (elements.schedulerSunriseOffsetInput) {
+  elements.schedulerSunriseOffsetInput.addEventListener('input', (event) => {
+    updateSchedulerFormField('sunriseOffsetMinutes', event.target.value);
+  });
+}
+if (elements.schedulerSunsetOffsetInput) {
+  elements.schedulerSunsetOffsetInput.addEventListener('input', (event) => {
+    updateSchedulerFormField('sunsetOffsetMinutes', event.target.value);
+  });
+}
+if (elements.schedulerRefreshButton) {
+  elements.schedulerRefreshButton.addEventListener('click', () => fetchSchedulerConfig(true));
 }
 document.addEventListener('click', (event) => {
   if (!state.timezonePickerOpen) {

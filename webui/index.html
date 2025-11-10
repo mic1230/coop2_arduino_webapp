@@ -207,6 +207,84 @@
             </div>
             <p class="subtle small" data-timezone-message hidden></p>
           </section>
+        <section class="card scheduler-card" data-scheduler-card hidden>
+          <div class="card-header">
+            <div>
+              <h2>Door automation</h2>
+              <p class="subtle">Automatically run the door around sunrise and sunset.</p>
+            </div>
+            <span class="chip warning" data-scheduler-enabled-chip>Automation disabled</span>
+          </div>
+          <div class="scheduler-summary">
+            <div>
+              <span class="label">Next action</span>
+              <strong data-scheduler-next-action>--</strong>
+            </div>
+            <div>
+              <span class="label">Sunrise</span>
+              <strong data-scheduler-sunrise-time>--</strong>
+            </div>
+            <div>
+              <span class="label">Door open target</span>
+              <strong data-scheduler-open-time>--</strong>
+            </div>
+            <div>
+              <span class="label">Sunset</span>
+              <strong data-scheduler-sunset-time>--</strong>
+            </div>
+            <div>
+              <span class="label">Door close target</span>
+              <strong data-scheduler-close-time>--</strong>
+            </div>
+          </div>
+          <div class="scheduler-history">
+            <div>
+              <span class="label">Last open</span>
+              <strong data-scheduler-last-open>--</strong>
+            </div>
+            <div>
+              <span class="label">Last close</span>
+              <strong data-scheduler-last-close>--</strong>
+            </div>
+          </div>
+          <div class="banner info" data-scheduler-message hidden></div>
+          <div class="banner error" data-scheduler-error hidden></div>
+          <form class="settings-form" data-scheduler-form>
+            <label class="scheduler-toggle">
+              <input type="checkbox" data-scheduler-enabled-input />
+              <span>Enable sunrise/sunset automation</span>
+            </label>
+            <div class="grid">
+              <label>
+                Latitude
+                <input type="text" inputmode="decimal" autocomplete="off" data-scheduler-latitude-input />
+              </label>
+              <label>
+                Longitude
+                <input type="text" inputmode="decimal" autocomplete="off" data-scheduler-longitude-input />
+              </label>
+            </div>
+            <div class="grid">
+              <label>
+                Sunrise offset (minutes)
+                <input type="number" inputmode="numeric" data-scheduler-sunrise-offset-input />
+              </label>
+              <label>
+                Sunset offset (minutes)
+                <input type="number" inputmode="numeric" data-scheduler-sunset-offset-input />
+              </label>
+            </div>
+            <p class="subtle small">
+              Offsets are counted in minutes from the actual sunrise/sunset. A value of
+              <strong>1</strong> waits one minute after the event, while <strong>-1</strong> runs one
+              minute before.
+            </p>
+            <div class="scheduler-actions">
+              <button type="button" class="ghost small" data-scheduler-refresh>Reload schedule</button>
+              <button type="submit" class="action-button" data-scheduler-save>Save schedule</button>
+            </div>
+          </form>
+        </section>
           <p class="subtle small" data-wifi-ap-hint hidden></p>
           <p class="subtle small" data-wifi-config-meta></p>
         </article>
@@ -215,3 +293,4 @@
     <script src="./app.js?v=20251109.0" type="module"></script>
   </body>
 </html>
+
