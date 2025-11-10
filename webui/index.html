@@ -211,6 +211,29 @@
             </div>
             <p class="subtle small" data-timezone-message hidden></p>
           </section>
+          <section class="card pin-card" data-pin-card>
+            <div class="card-header">
+              <div>
+                <h2>Hardware pins</h2>
+                <p class="subtle">Choose which GPIO pins control your relays and door sensor.</p>
+              </div>
+            </div>
+            <div class="banner info" data-pin-message hidden></div>
+            <form class="settings-form" data-pin-form>
+              <label for="pin-open-input">Open door pin</label>
+              <select id="pin-open-input" data-pin-open-input></select>
+              <label for="pin-close-input">Close door pin</label>
+              <select id="pin-close-input" data-pin-close-input></select>
+              <label for="pin-sensor-input">Sensor pin</label>
+              <select id="pin-sensor-input" data-pin-sensor-input></select>
+              <p class="subtle small">
+                Use unique pins for each connection. Only supported GPIOs appear in the dropdown.
+              </p>
+              <div class="settings-actions">
+                <button type="submit" class="action-button" data-pin-submit>Save pins</button>
+              </div>
+            </form>
+          </section>
         <section class="card scheduler-card" data-scheduler-card hidden>
           <div class="card-header">
             <div>

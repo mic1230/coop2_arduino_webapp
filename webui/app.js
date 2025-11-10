@@ -69,7 +69,19 @@ const state = {
     sunsetOffsetMinutes: String(DEFAULT_SUNSET_OFFSET)
   },
   schedulerDirty: false,
-  overrideMs: null
+  overrideMs: null,
+  pinConfig: null,
+  pinForm: {
+    openPin: '',
+    closePin: '',
+    sensorPin: ''
+  },
+  pinFormDirty: false,
+  pinAvailablePins: [],
+  pinLoading: false,
+  pinSaving: false,
+  pinMessage: '',
+  pinMessageType: ''
 };
 
 function supportsLocalStorage() {
@@ -196,6 +208,12 @@ const elements = {
   timezoneMessage: document.querySelector('[data-timezone-message]'),
   timezoneLabel: document.querySelector('[data-timezone-label]'),
   timezoneOffset: document.querySelector('[data-timezone-offset]'),
+  pinForm: document.querySelector('[data-pin-form]'),
+  pinOpenInput: document.querySelector('[data-pin-open-input]'),
+  pinCloseInput: document.querySelector('[data-pin-close-input]'),
+  pinSensorInput: document.querySelector('[data-pin-sensor-input]'),
+  pinSubmitButton: document.querySelector('[data-pin-submit]'),
+  pinMessage: document.querySelector('[data-pin-message]'),
   schedulerCard: document.querySelector('[data-scheduler-card]'),
   schedulerEnabledChip: document.querySelector('[data-scheduler-enabled-chip]'),
   schedulerNextAction: document.querySelector('[data-scheduler-next-action]'),
@@ -527,6 +545,7 @@ function render() {
   }
 
   renderWifiScanResults();
+  renderPinSettings();
   renderDoorHistory();
   renderTimezonePicker();
   renderSchedulerPanel();
@@ -611,6 +630,66 @@ function renderWifiScanResults() {
     }
     container.appendChild(button);
   });
+}
+
+function renderPinSettings() {
+  if (!elements.pinForm) {
+    return;
+  }
+  const settingsActive = state.activeTab === 'settings';
+  const loading = state.pinLoading;
+  const saving = state.pinSaving;
+  const locked = !settingsActive || saving;
+  const availablePins = Array.isArray(state.pinAvailablePins) ? state.pinAvailablePins : [];
+  const form = state.pinForm ?? { openPin: '', closePin: '', sensorPin: '' };
+  const inputMap = [
+    { element: elements.pinOpenInput, field: 'openPin' },
+    { element: elements.pinCloseInput, field: 'closePin' },
+    { element: elements.pinSensorInput, field: 'sensorPin' }
+  ];
+  const optionsKey = availablePins.join(',');
+  const ensureOptions = (element) => {
+    if (!element) {
+      return;
+    }
+    if (element.dataset.renderedOptions !== optionsKey) {
+      const placeholder = '<option value="">Select a GPIO</option>';
+      const optionsMarkup = availablePins
+        .map((value) => `<option value="${value}">${value}</option>`)
+        .join('');
+      element.innerHTML = placeholder + optionsMarkup;
+      element.dataset.renderedOptions = optionsKey;
+    }
+  };
+  inputMap.forEach(({ element, field }) => {
+    if (!element) {
+      return;
+    }
+    ensureOptions(element);
+    element.value = form[field] ?? '';
+    element.disabled = locked || loading;
+  });
+  if (elements.pinSubmitButton) {
+    const fieldsFilled = inputMap.every(({ field }) => Boolean((form[field] ?? '').trim()));
+    const canSubmit =
+      settingsActive && fieldsFilled && state.pinFormDirty && !loading && !saving;
+    elements.pinSubmitButton.disabled = !canSubmit;
+    elements.pinSubmitButton.textContent = saving ? 'Saving...' : 'Save pins';
+  }
+  if (elements.pinMessage) {
+    let messageText = state.pinMessage;
+    let messageType = state.pinMessageType || 'info';
+    if (!messageText && loading && settingsActive) {
+      messageText = 'Loading pin configuration...';
+      messageType = 'info';
+    }
+    const showMessage = settingsActive && Boolean(messageText);
+    elements.pinMessage.hidden = !showMessage;
+    if (showMessage) {
+      elements.pinMessage.textContent = messageText;
+      elements.pinMessage.className = `banner ${messageType}`;
+    }
+  }
 }
 
 function renderTimezonePicker() {
@@ -887,6 +966,27 @@ function formatVoltage(value) {
 
 function formatRssi(value) {
   return value == null ? '--' : `${value} dBm`;
+}
+
+function describePinError(code) {
+  switch (code) {
+    case 'invalid_open_pin':
+      return 'Select a supported GPIO for the open relay pin.';
+    case 'invalid_close_pin':
+      return 'Select a supported GPIO for the close relay pin.';
+    case 'invalid_sensor_pin':
+      return 'Select a supported GPIO for the sensor pin.';
+    case 'pin_conflict':
+      return 'Each pin must be unique.';
+    case 'missing_body':
+      return 'Request body is missing.';
+    case 'invalid_json':
+      return 'Pin update payload is invalid.';
+    case 'no_changes':
+      return 'Adjust a pin value before saving.';
+    default:
+      return 'Unable to update pin configuration.';
+  }
 }
 
 function formatTimezoneOffset(minutes) {
@@ -1186,6 +1286,144 @@ async function handleSchedulerSubmit(event) {
   }
 }
 
+function applyPinConfig(payload, options = {}) {
+  const availablePins = Array.isArray(payload?.availablePins)
+    ? payload.availablePins
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+    : state.pinAvailablePins;
+  const nextState = {
+    pinConfig: payload,
+    pinAvailablePins: availablePins,
+    pinLoading: false
+  };
+  const shouldSyncForm = !state.pinFormDirty || options.forceFormUpdate;
+  if (shouldSyncForm) {
+    nextState.pinForm = {
+      openPin: payload?.openPin == null ? '' : String(payload.openPin),
+      closePin: payload?.closePin == null ? '' : String(payload.closePin),
+      sensorPin: payload?.sensorPin == null ? '' : String(payload.sensorPin)
+    };
+    nextState.pinFormDirty = false;
+  }
+  setState(nextState);
+}
+
+async function fetchPinConfig(force = false) {
+  if (state.pinLoading && !force) {
+    return;
+  }
+  setState({ pinLoading: true, pinMessage: '', pinMessageType: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/pins'), { cache: 'no-store' });
+    const text = await response.text();
+    let payload = null;
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch (parseError) {
+        throw new Error('Unable to parse pin configuration.');
+      }
+    }
+    if (!response.ok) {
+      const message = payload?.error
+        ? describePinError(payload.error)
+        : `Pin request failed with HTTP ${response.status}`;
+      throw new Error(message);
+    }
+    if (!payload) {
+      throw new Error('Pin configuration payload missing.');
+    }
+    applyPinConfig(payload, { forceFormUpdate: !state.pinFormDirty });
+  } catch (error) {
+    console.error(error);
+    setState({
+      pinLoading: false,
+      pinMessage: error?.message ?? 'Unable to load pin configuration.',
+      pinMessageType: 'error'
+    });
+  }
+}
+
+function updatePinFormField(field, value) {
+  setState({
+    pinForm: { ...state.pinForm, [field]: value },
+    pinFormDirty: true,
+    pinMessage: '',
+    pinMessageType: ''
+  });
+}
+
+async function handlePinFormSubmit(event) {
+  event.preventDefault();
+  if (state.pinSaving) {
+    return;
+  }
+  const form = state.pinForm ?? {};
+  const fields = ['openPin', 'closePin', 'sensorPin'];
+  const payload = {};
+  for (const field of fields) {
+    const value = (form[field] ?? '').trim();
+    if (!value) {
+      setState({
+        pinMessage: 'All pin fields are required.',
+        pinMessageType: 'error'
+      });
+      return;
+    }
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed)) {
+      setState({
+        pinMessage: 'Pins must be numeric GPIO values.',
+        pinMessageType: 'error'
+      });
+      return;
+    }
+    payload[field] = parsed;
+  }
+  setState({ pinSaving: true, pinMessage: '', pinMessageType: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/pins'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify(payload)
+    });
+    const text = await response.text();
+    let body = null;
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch (parseError) {
+        throw new Error('Unable to parse controller response.');
+      }
+    }
+    if (!response.ok) {
+      const message = body?.error
+        ? describePinError(body.error)
+        : `Pin update failed with HTTP ${response.status}`;
+      throw new Error(message);
+    }
+    if (!body) {
+      throw new Error('Controller did not return the updated pins.');
+    }
+    applyPinConfig(body, { forceFormUpdate: true });
+    setState({
+      pinSaving: false,
+      pinMessage: 'Pin configuration saved.',
+      pinMessageType: 'success',
+      pinFormDirty: false
+    });
+  } catch (error) {
+    console.error(error);
+    setState({
+      pinSaving: false,
+      pinMessage: error?.message ?? 'Unable to save pin configuration.',
+      pinMessageType: 'error'
+    });
+  }
+}
+
 function downloadHistoryCsv() {
   const timestamp = new Date().toISOString().replace(/[:]/g, '-').split('.')[0];
   const link = document.createElement('a');
@@ -1215,6 +1453,9 @@ function activateTab(tabName) {
   }
   if (tabName === 'settings' && !state.schedulerStatus && !state.schedulerLoading) {
     fetchSchedulerConfig();
+  }
+  if (tabName === 'settings' && !state.pinConfig && !state.pinLoading) {
+    fetchPinConfig();
   }
 }
 
@@ -1817,6 +2058,23 @@ document.addEventListener('click', (event) => {
   if (Object.keys(nextPatch).length > 0) {
     setState(nextPatch);
   }
+});
+
+if (elements.pinForm) {
+  elements.pinForm.addEventListener('submit', handlePinFormSubmit);
+}
+const pinFieldMap = [
+  { element: elements.pinOpenInput, field: 'openPin' },
+  { element: elements.pinCloseInput, field: 'closePin' },
+  { element: elements.pinSensorInput, field: 'sensorPin' }
+];
+pinFieldMap.forEach(({ element, field }) => {
+  if (!element) {
+    return;
+  }
+  element.addEventListener('input', (event) => {
+    updatePinFormField(field, event.target.value);
+  });
 });
 
 window.addEventListener('beforeunload', () => {

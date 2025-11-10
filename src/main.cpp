@@ -87,8 +87,8 @@ void persistRetainWifiPreference(bool retain);
 //==============================================================================
 // Door control (ported from MicroPython open_door / close_door)
 //==============================================================================
-constexpr uint8_t RELAY_OPEN_PIN = 4;   // Relay that drives the OPEN direction
-constexpr uint8_t RELAY_CLOSE_PIN = 5;  // Relay that drives the CLOSE direction
+constexpr uint8_t DEFAULT_RELAY_OPEN_PIN = 4;   // Relay that drives the OPEN direction
+constexpr uint8_t DEFAULT_RELAY_CLOSE_PIN = 5;  // Relay that drives the CLOSE direction
 constexpr uint32_t DOOR_TRAVEL_TIME_MS = 5000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
@@ -100,8 +100,29 @@ constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
 //==============================================================================
 // Sensor configuration (ported from MicroPython get_sensor_readings)
 //==============================================================================
-constexpr uint8_t DS18B20_PIN = 3;
+constexpr uint8_t DEFAULT_SENSOR_PIN = 3;
 constexpr uint8_t BATTERY_ADC_PIN = 1;  // Matches MicroPython's ADC Pin 1
+constexpr uint8_t DEFAULT_AVAILABLE_GPIO_PINS[] = {2,  4,  5,  12, 13, 14, 15, 16, 17, 18,
+                                                   19, 21, 22, 23, 25, 26, 27, 32, 33};
+constexpr size_t DEFAULT_AVAILABLE_GPIO_PIN_COUNT =
+    sizeof(DEFAULT_AVAILABLE_GPIO_PINS) / sizeof(DEFAULT_AVAILABLE_GPIO_PINS[0]);
+
+struct DoorPinConfig {
+  uint8_t openPin = DEFAULT_RELAY_OPEN_PIN;
+  uint8_t closePin = DEFAULT_RELAY_CLOSE_PIN;
+  uint8_t sensorPin = DEFAULT_SENSOR_PIN;
+};
+
+DoorPinConfig doorPinConfig;
+std::vector<uint8_t> availablePins =
+    []() {
+      std::vector<uint8_t> pins;
+      pins.reserve(DEFAULT_AVAILABLE_GPIO_PIN_COUNT);
+      for (size_t idx = 0; idx < DEFAULT_AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+        pins.push_back(DEFAULT_AVAILABLE_GPIO_PINS[idx]);
+      }
+      return pins;
+    }();
 constexpr float ADC_REFERENCE_VOLTS = 3.3f;
 constexpr float VOLTAGE_DIVIDER_RATIO = 0.8333f;  // 10k / (10k + 2k)
 constexpr uint16_t SENSOR_CONVERSION_DELAY_MS = 750;
@@ -137,14 +158,15 @@ constexpr double RAD_TO_DEG_D = 57.295779513082320876798;
 constexpr int MIN_SUN_OFFSET_MINUTES = -720;
 constexpr int MAX_SUN_OFFSET_MINUTES = 720;
 constexpr uint32_t MANUAL_OVERRIDE_DURATION_SECONDS = 30 * 60;
-constexpr int AVAILABLE_GPIO_PINS[] = {2,  4,  5,  12, 13, 14, 15, 16, 17, 18,
-                                       19, 21, 22, 23, 25, 26, 27, 32, 33};
-constexpr size_t AVAILABLE_GPIO_PIN_COUNT = sizeof(AVAILABLE_GPIO_PINS) / sizeof(int);
 constexpr char PREF_KEY_SCHED_OPEN_DAY[] = "sched_open_day";
 constexpr char PREF_KEY_SCHED_CLOSE_DAY[] = "sched_close_day";
 constexpr char PREF_KEY_SCHED_OPEN_TS[] = "sched_open_ts";
 constexpr char PREF_KEY_SCHED_CLOSE_TS[] = "sched_close_ts";
 constexpr char PREF_KEY_OVERRIDE_UNTIL[] = "override_until";
+constexpr char PREF_KEY_PIN_OPEN[] = "pin_open";
+constexpr char PREF_KEY_PIN_CLOSE[] = "pin_close";
+constexpr char PREF_KEY_PIN_SENSOR[] = "pin_sensor";
+constexpr const char *AVAILABLE_PINS_PATH = "/available_pins.json";
 
 struct SolarScheduleConfig {
   bool enabled = SOLAR_AUTOMATION_DEFAULT_ENABLED;
@@ -218,6 +240,12 @@ void initBatteryAdc();
 bool readTemperature(const DeviceAddress address, const char *label, float &valueOut);
 SensorReadings getSensorReadings();
 void logSensorReadings();
+void resetTemperatureSensors();
+DoorPinConfig readDoorPinConfigFromPrefs();
+void loadDoorPinConfig();
+bool persistDoorPinConfig(const DoorPinConfig &config);
+bool validateDoorPinConfig(const DoorPinConfig &config, String &errorCode);
+void applyDoorPinConfig(const DoorPinConfig &config, bool persist);
 bool ensureFileSystem();
 void loadDoorHistoryFromDisk();
 void trimDoorHistoryCsv();
@@ -244,6 +272,10 @@ bool rewriteDoorHistoryCsvDisplayTimes();
 void applyTimezoneOption(const TimezoneOption &option);
 bool waitForSerial(uint32_t timeoutMs = SERIAL_WAIT_TIMEOUT_MS);
 void updateSerialAttachmentAnnounce();
+void ensureAvailablePinsCatalog();
+std::vector<uint8_t> detectAvailablePins();
+bool loadAvailablePinsFromFile(std::vector<uint8_t> &pinsOut);
+bool persistAvailablePinsFile(const std::vector<uint8_t> &pins);
 bool loadSolarScheduleConfig();
 bool saveSolarScheduleConfig(const SolarScheduleConfig &config);
 void loadSolarScheduleExecutionState();
@@ -256,6 +288,7 @@ uint16_t localDayOfYear(time_t ts);
 std::string availablePinsCsv();
 void addAvailablePins(ArduinoJson::JsonArray arr);
 String chipDescriptor();
+String doorPinConfigToJson(bool includeAvailablePins = false);
 String solarSchedulerStatusToJson(bool includeDeviceMeta = false);
 void handleSolarScheduleStatus();
 void handleSolarScheduleUpdate();
@@ -264,6 +297,8 @@ void persistManualOverrideState();
 void beginManualOverride();
 bool manualOverrideActive(time_t nowUtc = 0);
 void updateManualOverride(time_t nowUtc = 0);
+void handlePinConfigStatus();
+void handlePinConfigUpdate();
 
 WebServer apiServer(80);
 bool apiServerEnabled = false;
@@ -319,6 +354,10 @@ struct DoorMotionController {
 };
 
 DoorMotionController doorMotion;
+uint8_t configuredRelayOpenPin = 0;
+uint8_t configuredRelayClosePin = 0;
+bool temperatureSensorsInitialized = false;
+uint8_t configuredSensorPin = 0;
 
 struct DoorHistoryEntry {
   time_t timestamp = 0;
@@ -360,17 +399,29 @@ DoorState doorStateFromString(const String &value) {
   return value == "opened" ? DoorState::Opened : DoorState::Closed;
 }
 
-void initDoorHardware() {
+void initDoorHardware(bool force = false) {
   if (TEST_MODE) {
     Serial.println("TEST MODE: Door relays not initialized; hardware outputs disabled.");
     return;
   }
 
-  pinMode(RELAY_OPEN_PIN, OUTPUT);
-  pinMode(RELAY_CLOSE_PIN, OUTPUT);
-  digitalWrite(RELAY_OPEN_PIN, RELAY_IDLE_STATE);
-  digitalWrite(RELAY_CLOSE_PIN, RELAY_IDLE_STATE);
-  Serial.println("Door relays initialized (active-low).");
+  const uint8_t openPin = doorPinConfig.openPin;
+  const uint8_t closePin = doorPinConfig.closePin;
+  if (!force && configuredRelayOpenPin == openPin && configuredRelayClosePin == closePin) {
+    return;
+  }
+
+  auto configurePin = [](uint8_t pin) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, RELAY_IDLE_STATE);
+  };
+
+  configurePin(openPin);
+  configurePin(closePin);
+  configuredRelayOpenPin = openPin;
+  configuredRelayClosePin = closePin;
+  Serial.printf("Door relays initialized on pins open=%u close=%u (active-low).\n",
+                static_cast<unsigned>(openPin), static_cast<unsigned>(closePin));
 }
 
 bool initDoorPreferences() {
@@ -466,7 +517,7 @@ void logDoorStatusIfChanged(const __FlashStringHelper *tag) {
 }
 
 uint8_t relayPinForMotion(DoorMotion motion) {
-  return motion == DoorMotion::Opening ? RELAY_OPEN_PIN : RELAY_CLOSE_PIN;
+  return motion == DoorMotion::Opening ? doorPinConfig.openPin : doorPinConfig.closePin;
 }
 
 void setRelayState(uint8_t pin, bool active) {
@@ -481,13 +532,13 @@ void setRelayState(uint8_t pin, bool active) {
 }
 
 void stopAllRelays() {
-  setRelayState(RELAY_OPEN_PIN, false);
-  setRelayState(RELAY_CLOSE_PIN, false);
+  setRelayState(doorPinConfig.openPin, false);
+  setRelayState(doorPinConfig.closePin, false);
 }
 
 bool isSupportedGpio(int pin) {
-  for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
-    if (AVAILABLE_GPIO_PINS[idx] == pin) {
+  for (uint8_t candidate : availablePins) {
+    if (candidate == pin) {
       return true;
     }
   }
@@ -496,19 +547,216 @@ bool isSupportedGpio(int pin) {
 
 std::string availablePinsCsv() {
   std::ostringstream oss;
-  for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+  for (size_t idx = 0; idx < availablePins.size(); ++idx) {
     if (idx > 0) {
       oss << ", ";
     }
-    oss << AVAILABLE_GPIO_PINS[idx];
+    oss << static_cast<unsigned>(availablePins[idx]);
   }
   return oss.str();
 }
 
 void addAvailablePins(ArduinoJson::JsonArray arr) {
-  for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
-    arr.add(AVAILABLE_GPIO_PINS[idx]);
+  for (uint8_t pin : availablePins) {
+    arr.add(pin);
   }
+}
+
+std::vector<uint8_t> detectAvailablePins() {
+  std::vector<uint8_t> detected;
+  detected.reserve(DEFAULT_AVAILABLE_GPIO_PIN_COUNT);
+  for (size_t idx = 0; idx < DEFAULT_AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+    detected.push_back(DEFAULT_AVAILABLE_GPIO_PINS[idx]);
+  }
+  return detected;
+}
+
+bool persistAvailablePinsFile(const std::vector<uint8_t> &pins) {
+  if (!ensureFileSystem()) {
+    return false;
+  }
+  File file = LittleFS.open(AVAILABLE_PINS_PATH, "w");
+  if (!file) {
+    Serial.println("Failed to open available pins catalog for writing.");
+    return false;
+  }
+  StaticJsonDocument<256> doc;
+  JsonArray arr = doc.createNestedArray("pins");
+  for (uint8_t pin : pins) {
+    arr.add(pin);
+  }
+  if (serializeJson(doc, file) == 0) {
+    Serial.println("Failed to write available pins catalog.");
+    file.close();
+    return false;
+  }
+  file.close();
+  return true;
+}
+
+bool loadAvailablePinsFromFile(std::vector<uint8_t> &pinsOut) {
+  if (!ensureFileSystem()) {
+    return false;
+  }
+  if (!LittleFS.exists(AVAILABLE_PINS_PATH)) {
+    return false;
+  }
+  File file = LittleFS.open(AVAILABLE_PINS_PATH, "r");
+  if (!file) {
+    Serial.println("Failed to open available pins catalog for reading.");
+    return false;
+  }
+  StaticJsonDocument<256> doc;
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    Serial.printf("Unable to parse available pins catalog: %s\n", error.c_str());
+    return false;
+  }
+  JsonArray arr = doc["pins"].as<JsonArray>();
+  if (arr.isNull()) {
+    return false;
+  }
+  std::vector<uint8_t> pins;
+  pins.reserve(arr.size());
+  for (JsonVariant value : arr) {
+    if (!value.is<int>()) {
+      continue;
+    }
+    const int pin = value.as<int>();
+    if (pin < 0 || pin > 39) {
+      continue;
+    }
+    pins.push_back(static_cast<uint8_t>(pin));
+  }
+  if (pins.empty()) {
+    return false;
+  }
+  pinsOut = std::move(pins);
+  return true;
+}
+
+void ensureAvailablePinsCatalog() {
+  std::vector<uint8_t> pins;
+  if (loadAvailablePinsFromFile(pins)) {
+    availablePins = pins;
+    Serial.printf("Loaded %u available GPIO pins from catalog.\n",
+                  static_cast<unsigned>(availablePins.size()));
+    return;
+  }
+  pins = detectAvailablePins();
+  if (pins.empty()) {
+    Serial.println("No GPIO pins detected; falling back to safe defaults.");
+    pins.push_back(DEFAULT_RELAY_OPEN_PIN);
+    pins.push_back(DEFAULT_RELAY_CLOSE_PIN);
+  }
+  availablePins = pins;
+  if (persistAvailablePinsFile(availablePins)) {
+    Serial.printf("Available GPIO pin catalog created with %u entries.\n",
+                  static_cast<unsigned>(availablePins.size()));
+  } else {
+    Serial.println("Failed to persist available GPIO pin catalog.");
+  }
+}
+
+bool validateDoorPinConfig(const DoorPinConfig &config, String &errorCode) {
+  if (!isSupportedGpio(config.openPin)) {
+    errorCode = F("invalid_open_pin");
+    return false;
+  }
+  if (!isSupportedGpio(config.closePin)) {
+    errorCode = F("invalid_close_pin");
+    return false;
+  }
+  if (!isSupportedGpio(config.sensorPin)) {
+    errorCode = F("invalid_sensor_pin");
+    return false;
+  }
+  if (config.openPin == config.closePin || config.openPin == config.sensorPin ||
+      config.closePin == config.sensorPin) {
+    errorCode = F("pin_conflict");
+    return false;
+  }
+  return true;
+}
+
+bool persistDoorPinConfig(const DoorPinConfig &config) {
+  if (!initDoorPreferences()) {
+    Serial.println("Unable to persist door pin configuration (prefs unavailable).");
+    return false;
+  }
+  doorPrefs.putUChar(PREF_KEY_PIN_OPEN, config.openPin);
+  doorPrefs.putUChar(PREF_KEY_PIN_CLOSE, config.closePin);
+  doorPrefs.putUChar(PREF_KEY_PIN_SENSOR, config.sensorPin);
+  Serial.printf("Door pin configuration saved (open=%u close=%u sensor=%u).\n",
+                static_cast<unsigned>(config.openPin), static_cast<unsigned>(config.closePin),
+                static_cast<unsigned>(config.sensorPin));
+  return true;
+}
+
+DoorPinConfig readDoorPinConfigFromPrefs() {
+  DoorPinConfig config;
+  if (!initDoorPreferences()) {
+    Serial.println("Door preferences unavailable; using default pin configuration.");
+    return config;
+  }
+  config.openPin = doorPrefs.getUChar(PREF_KEY_PIN_OPEN, config.openPin);
+  config.closePin = doorPrefs.getUChar(PREF_KEY_PIN_CLOSE, config.closePin);
+  config.sensorPin = doorPrefs.getUChar(PREF_KEY_PIN_SENSOR, config.sensorPin);
+  String error;
+  if (!validateDoorPinConfig(config, error)) {
+    Serial.printf("Persisted door pin configuration invalid (%s). Using defaults (%u,%u,%u).\n",
+                  error.c_str(), static_cast<unsigned>(DEFAULT_RELAY_OPEN_PIN),
+                  static_cast<unsigned>(DEFAULT_RELAY_CLOSE_PIN),
+                  static_cast<unsigned>(DEFAULT_SENSOR_PIN));
+    return DoorPinConfig{};
+  }
+  Serial.printf("Door pin configuration loaded (open=%u close=%u sensor=%u).\n",
+                static_cast<unsigned>(config.openPin), static_cast<unsigned>(config.closePin),
+                static_cast<unsigned>(config.sensorPin));
+  return config;
+}
+
+void loadDoorPinConfig() {
+  doorPinConfig = readDoorPinConfigFromPrefs();
+}
+
+void applyDoorPinConfig(const DoorPinConfig &config, bool persist) {
+  DoorPinConfig next = config;
+  String error;
+  if (!validateDoorPinConfig(next, error)) {
+    Serial.printf("Rejected door pin configuration (%s).\n", error.c_str());
+    return;
+  }
+  doorPinConfig = next;
+  if (persist) {
+    persistDoorPinConfig(next);
+  }
+  initDoorHardware(true);
+  resetTemperatureSensors();
+}
+
+String doorPinConfigToJson(bool includeAvailablePins) {
+  String json;
+  json.reserve(includeAvailablePins ? 192 : 96);
+  json += F("{\"openPin\":");
+  json += String(doorPinConfig.openPin);
+  json += F(",\"closePin\":");
+  json += String(doorPinConfig.closePin);
+  json += F(",\"sensorPin\":");
+  json += String(doorPinConfig.sensorPin);
+  if (includeAvailablePins) {
+    json += F(",\"availablePins\":[");
+    for (size_t idx = 0; idx < availablePins.size(); ++idx) {
+      if (idx > 0) {
+        json += ',';
+      }
+      json += String(static_cast<unsigned>(availablePins[idx]));
+    }
+    json += F("]");
+  }
+  json += F("}");
+  return json;
 }
 
 String chipDescriptor() {
@@ -598,18 +846,27 @@ DoorCommandResult closeDoor() {
 //==============================================================================
 // Sensor helpers
 //==============================================================================
+void resetTemperatureSensors() {
+  temperatureSensorsInitialized = false;
+  configuredSensorPin = 0;
+}
+
 void initTemperatureSensors() {
-  static bool initialized = false;
-  if (initialized || TEST_MODE) {
+  if (TEST_MODE) {
     return;
   }
-  onewireBus.begin(DS18B20_PIN);
+  const uint8_t sensorPin = doorPinConfig.sensorPin;
+  if (temperatureSensorsInitialized && configuredSensorPin == sensorPin) {
+    return;
+  }
+  onewireBus.begin(sensorPin);
   temperatureBus.begin();
   temperatureBus.setWaitForConversion(false);
   if (VERBOSE_LOGS) {
-    Serial.printf("DS18B20 bus initialized on pin %u.\n", DS18B20_PIN);
+    Serial.printf("DS18B20 bus initialized on pin %u.\n", static_cast<unsigned>(sensorPin));
   }
-  initialized = true;
+  temperatureSensorsInitialized = true;
+  configuredSensorPin = sensorPin;
 }
 
 void initBatteryAdc() {
@@ -1735,11 +1992,11 @@ String solarSchedulerStatusToJson(bool includeDeviceMeta) {
   json += F("}");
   if (includeDeviceMeta) {
     json += F(",\"availablePins\":[");
-    for (size_t idx = 0; idx < AVAILABLE_GPIO_PIN_COUNT; ++idx) {
+    for (size_t idx = 0; idx < availablePins.size(); ++idx) {
       if (idx > 0) {
         json += ',';
       }
-      json += String(AVAILABLE_GPIO_PINS[idx]);
+      json += String(static_cast<unsigned>(availablePins[idx]));
     }
     json += F("],\"device\":\"");
     json += escapeJson(chipDescriptor());
@@ -1769,7 +2026,7 @@ void handleApiRoot() {
   String json =
       F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
         "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/api/schedule\","
-        "\"/history.csv\"]}");
+        "\"/api/pins\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -2163,6 +2420,58 @@ void handleSolarScheduleUpdate() {
   sendJsonResponse(200, solarSchedulerStatusToJson(true));
 }
 
+void handlePinConfigStatus() {
+  sendJsonResponse(200, doorPinConfigToJson(true));
+}
+
+void handlePinConfigUpdate() {
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  StaticJsonDocument<128> doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
+    return;
+  }
+  DoorPinConfig requested = doorPinConfig;
+  bool changed = false;
+  if (doc.containsKey("openPin")) {
+    requested.openPin = static_cast<uint8_t>(doc["openPin"].as<int>());
+    changed = true;
+  }
+  if (doc.containsKey("closePin")) {
+    requested.closePin = static_cast<uint8_t>(doc["closePin"].as<int>());
+    changed = true;
+  }
+  if (doc.containsKey("sensorPin")) {
+    requested.sensorPin = static_cast<uint8_t>(doc["sensorPin"].as<int>());
+    changed = true;
+  }
+  if (!changed) {
+    sendJsonResponse(400, F("{\"error\":\"no_changes\"}"));
+    return;
+  }
+  String validationError;
+  if (!validateDoorPinConfig(requested, validationError)) {
+    String json;
+    json.reserve(48);
+    json += F("{\"error\":\"");
+    json += validationError;
+    json += F("\"}");
+    sendJsonResponse(400, json);
+    return;
+  }
+  applyDoorPinConfig(requested, true);
+  sendJsonResponse(200, doorPinConfigToJson(true));
+}
+
 void announceConfigPortalStatus(bool force) {
   if (!configPortalActive) {
     return;
@@ -2315,6 +2624,9 @@ void startApiServer() {
   apiServer.on("/api/schedule", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/schedule", HTTP_GET, handleSolarScheduleStatus);
   apiServer.on("/api/schedule", HTTP_POST, handleSolarScheduleUpdate);
+  apiServer.on("/api/pins", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/pins", HTTP_GET, handlePinConfigStatus);
+  apiServer.on("/api/pins", HTTP_POST, handlePinConfigUpdate);
   apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
@@ -2338,8 +2650,11 @@ void setup() {
   Serial.println("Booting coop door controller...");
   WiFi.onEvent(handleWifiEvent);
 
-  initDoorHardware();
   ensureFileSystem();
+  ensureAvailablePinsCatalog();
+  initDoorPreferences();
+  loadDoorPinConfig();
+  initDoorHardware(true);
   loadSolarScheduleConfig();
   loadSolarScheduleExecutionState();
   loadManualOverrideState();
