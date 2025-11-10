@@ -1,6 +1,6 @@
 # Coop Door Web UI
 
-The Svelte/Vite stack has been replaced with a zero-build interface that uses plain HTML, Pico.css, and vanilla JavaScript. Everything the controller needs lives in this folder, so deployment is as simple as copying three files.
+This folder now hosts a zero-build interface that uses plain HTML, Pico.css, and vanilla JavaScript. Everything the controller needs lives here, so deployment is as simple as copying three files.
 
 ## Files
 
