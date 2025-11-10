@@ -31,7 +31,9 @@ for name, data_file in CERTS.items():
         continue
     output_file = BUILD_DIR / f"{name}.crt.S"
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    rendered = ASM_TEMPLATE.format(symbol=f"{name}_crt", crt_path=str(data_file))
+    rendered = ASM_TEMPLATE.format(
+        symbol=f"{name}_crt", crt_path=data_file.as_posix()
+    )
     if not output_file.exists() or output_file.read_text() != rendered:
         log_entries.append(f"write:{output_file}")
         output_file.write_text(rendered)
