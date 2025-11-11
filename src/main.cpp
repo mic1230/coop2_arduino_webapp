@@ -10,8 +10,7 @@
 #include <esp_ota_ops.h>
 #include <esp_wifi.h>
 #include <esp32-hal-adc.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
+#include <Wire.h>
 #include <FS.h>
 #include <LittleFS.h>
 #include <time.h>
@@ -114,27 +113,21 @@ constexpr size_t DEFAULT_AVAILABLE_GPIO_PIN_COUNT =
     sizeof(DEFAULT_AVAILABLE_GPIO_PINS) / sizeof(DEFAULT_AVAILABLE_GPIO_PINS[0]);
 
 struct DoorPinConfig {
-  uint8_t openPin = 17;
-  uint8_t closePin = 19;
-  uint8_t sensorPin = 20;
+  uint8_t openPin = 21;
+  uint8_t closePin = 20;
+  uint8_t sensorPinSda = 22;
+  uint8_t sensorPinScl = 23;
   uint32_t travelTimeMs = DEFAULT_DOOR_TRAVEL_TIME_MS;
 };
 
-constexpr DoorPinConfig DEFAULT_DOOR_PIN_ASSIGNMENTS = {17, 19, 2, DEFAULT_DOOR_TRAVEL_TIME_MS};
+constexpr DoorPinConfig DEFAULT_DOOR_PIN_ASSIGNMENTS = {21, 20, 22, 23, DEFAULT_DOOR_TRAVEL_TIME_MS};
 
 DoorPinConfig doorPinConfig = DEFAULT_DOOR_PIN_ASSIGNMENTS;
-std::vector<uint8_t> availablePins =
-    []() {
-      std::vector<uint8_t> pins;
-      pins.reserve(DEFAULT_AVAILABLE_GPIO_PIN_COUNT);
-      for (size_t idx = 0; idx < DEFAULT_AVAILABLE_GPIO_PIN_COUNT; ++idx) {
-        pins.push_back(DEFAULT_AVAILABLE_GPIO_PINS[idx]);
-      }
-      return pins;
-    }();
 constexpr float ADC_REFERENCE_VOLTS = 3.3f;
 constexpr float VOLTAGE_DIVIDER_RATIO = 0.8333f;  // 10k / (10k + 2k)
-constexpr uint16_t SENSOR_CONVERSION_DELAY_MS = 750;
+constexpr uint8_t SHT31_I2C_ADDRESS = 0x44;
+constexpr uint16_t SHT31_MEASUREMENT_DELAY_MS = 20;
+constexpr uint8_t INVALID_PIN = 0xFF;
 
 //==============================================================================
 // Door history tracking
@@ -145,7 +138,7 @@ constexpr const char *DOOR_HISTORY_CSV_PATH = "/door_history.csv";
 constexpr size_t DOOR_HISTORY_MAX_BYTES = 1024 * 1024;
 constexpr uint32_t DOOR_HISTORY_HOURLY_SECONDS = 60 * 60;
 constexpr const char *DOOR_HISTORY_CSV_HEADER =
-    "timestamp,display_time,door_state,battery_temp_c,greenhouse_temp_c,battery_voltage,event\n";
+    "timestamp,display_time,door_state,greenhouse_temp_c,greenhouse_humidity_pct,battery_voltage,event\n";
 constexpr const char *DOOR_HISTORY_CSV_TEMP_PATH = "/door_history.tmp";
 
 //==============================================================================
@@ -172,8 +165,6 @@ constexpr char PREF_KEY_SCHED_CLOSE_DAY[] = "sched_close_day";
 constexpr char PREF_KEY_SCHED_OPEN_TS[] = "sched_open_ts";
 constexpr char PREF_KEY_SCHED_CLOSE_TS[] = "sched_close_ts";
 constexpr char PREF_KEY_OVERRIDE_UNTIL[] = "override_until";
-constexpr const char *AVAILABLE_PINS_PATH = "/available_pins.json";
-constexpr const char *DOOR_PIN_ASSIGNMENTS_PATH = "/door_pins.json";
 
 struct SolarScheduleConfig {
   bool enabled = SOLAR_AUTOMATION_DEFAULT_ENABLED;
@@ -227,34 +218,22 @@ constexpr char PREF_KEY_TIMEZONE_RENDER_ID[] = "tz_render";
 
 struct DoorHistoryEntry;
 
-OneWire onewireBus;
-DallasTemperature temperatureBus(&onewireBus);
-
-const DeviceAddress BATTERY_TEMP_ADDRESS = {0x28, 0xA5, 0x35, 0x57, 0x04, 0xE1, 0x3C, 0x93};
-const DeviceAddress GREENHOUSE_TEMP_ADDRESS = {0x28, 0x66, 0x11, 0x57, 0x04, 0xE1, 0x3C, 0xB2};
+TwoWire greenhouseSensorWire = TwoWire(0);
 
 struct SensorReadings {
-  bool hasBatteryTemp = false;
-  float batteryTempC = 0.0f;
   bool hasGreenhouseTemp = false;
   float greenhouseTempC = 0.0f;
+  bool hasGreenhouseHumidity = false;
+  float greenhouseHumidityPct = 0.0f;
   bool hasBatteryVoltage = false;
   float batteryVoltage = 0.0f;
 };
 
 void initTemperatureSensors();
 void initBatteryAdc();
-bool readTemperature(const DeviceAddress address, const char *label, float &valueOut);
 SensorReadings getSensorReadings();
 void logSensorReadings();
 void resetTemperatureSensors();
-DoorPinConfig readDoorPinConfigFromFile();
-void loadDoorPinConfig();
-bool persistDoorPinConfig(const DoorPinConfig &config);
-bool validateDoorPinConfig(const DoorPinConfig &config, String &errorCode);
-void applyDoorPinConfig(const DoorPinConfig &config, bool persist);
-bool persistDoorPinAssignmentsFile(const DoorPinConfig &config);
-bool loadDoorPinAssignmentsFile(DoorPinConfig &configOut);
 bool ensureFileSystem();
 void loadDoorHistoryFromDisk();
 void trimDoorHistoryCsv();
@@ -265,7 +244,7 @@ void syncClock();
 time_t currentTimestamp();
 String formatHistoryTimestamp(time_t ts);
 String formatDoorHistoryCsvLine(const DoorHistoryEntry &entry);
-bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut);
+bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut, bool legacyFormat);
 void pushDoorHistoryEntry(const DoorHistoryEntry &entry);
 bool serveEmbeddedAsset(WebServer &server, const String &requestPath);
 void handleWebIndex();
@@ -281,10 +260,6 @@ bool rewriteDoorHistoryCsvDisplayTimes();
 void applyTimezoneOption(const TimezoneOption &option);
 bool waitForSerial(uint32_t timeoutMs = SERIAL_WAIT_TIMEOUT_MS);
 void updateSerialAttachmentAnnounce();
-void ensureAvailablePinsCatalog();
-std::vector<uint8_t> detectAvailablePins();
-bool loadAvailablePinsFromFile(std::vector<uint8_t> &pinsOut);
-bool persistAvailablePinsFile(const std::vector<uint8_t> &pins);
 bool loadSolarScheduleConfig();
 bool saveSolarScheduleConfig(const SolarScheduleConfig &config);
 void loadSolarScheduleExecutionState();
@@ -294,10 +269,7 @@ void resetSolarScheduleRuntime();
 bool ensureSolarScheduleTimes(time_t nowUtc);
 void updateSolarScheduler();
 uint16_t localDayOfYear(time_t ts);
-std::string availablePinsCsv();
-void addAvailablePins(ArduinoJson::JsonArray arr);
 String chipDescriptor();
-String doorPinConfigToJson(bool includeAvailablePins = false);
 String solarSchedulerStatusToJson(bool includeDeviceMeta = false);
 void handleSolarScheduleStatus();
 void handleSolarScheduleUpdate();
@@ -306,8 +278,6 @@ void persistManualOverrideState();
 void beginManualOverride();
 bool manualOverrideActive(time_t nowUtc = 0);
 void updateManualOverride(time_t nowUtc = 0);
-void handlePinConfigStatus();
-void handlePinConfigUpdate();
 String escapeJson(const String &value);
 String firmwareMetadataToJson();
 String otaStatusToJson();
@@ -372,15 +342,16 @@ DoorMotionController doorMotion;
 uint8_t configuredRelayOpenPin = 0;
 uint8_t configuredRelayClosePin = 0;
 bool temperatureSensorsInitialized = false;
-uint8_t configuredSensorPin = 0;
+uint8_t configuredSensorSdaPin = INVALID_PIN;
+uint8_t configuredSensorSclPin = INVALID_PIN;
 
 struct DoorHistoryEntry {
   time_t timestamp = 0;
   DoorState doorState = DoorState::Closed;
-  bool hasBatteryTemp = false;
-  float batteryTempC = 0.0f;
   bool hasGreenhouseTemp = false;
   float greenhouseTempC = 0.0f;
+  bool hasGreenhouseHumidity = false;
+  float greenhouseHumidityPct = 0.0f;
   bool hasBatteryVoltage = false;
   float batteryVoltage = 0.0f;
   String event;
@@ -568,300 +539,6 @@ void stopAllRelays() {
   setRelayState(doorPinConfig.closePin, false);
 }
 
-bool isSupportedGpio(int pin) {
-  for (uint8_t candidate : availablePins) {
-    if (candidate == pin) {
-      return true;
-    }
-  }
-  return false;
-}
-
-std::string availablePinsCsv() {
-  std::ostringstream oss;
-  for (size_t idx = 0; idx < availablePins.size(); ++idx) {
-    if (idx > 0) {
-      oss << ", ";
-    }
-    oss << static_cast<unsigned>(availablePins[idx]);
-  }
-  return oss.str();
-}
-
-void addAvailablePins(ArduinoJson::JsonArray arr) {
-  for (uint8_t pin : availablePins) {
-    arr.add(pin);
-  }
-}
-
-std::vector<uint8_t> detectAvailablePins() {
-  std::vector<uint8_t> detected;
-  detected.reserve(DEFAULT_AVAILABLE_GPIO_PIN_COUNT);
-  for (size_t idx = 0; idx < DEFAULT_AVAILABLE_GPIO_PIN_COUNT; ++idx) {
-    detected.push_back(DEFAULT_AVAILABLE_GPIO_PINS[idx]);
-  }
-  return detected;
-}
-
-bool persistAvailablePinsFile(const std::vector<uint8_t> &pins) {
-  if (!ensureFileSystem()) {
-    return false;
-  }
-  File file = LittleFS.open(AVAILABLE_PINS_PATH, "w");
-  if (!file) {
-    Serial.println("Failed to open available pins catalog for writing.");
-    return false;
-  }
-  ArduinoJson::JsonDocument doc;
-  JsonArray arr = doc["pins"].to<JsonArray>();
-  for (uint8_t pin : pins) {
-    arr.add(pin);
-  }
-  if (serializeJson(doc, file) == 0) {
-    Serial.println("Failed to write available pins catalog.");
-    file.close();
-    return false;
-  }
-  file.close();
-  return true;
-}
-
-bool loadAvailablePinsFromFile(std::vector<uint8_t> &pinsOut) {
-  if (!ensureFileSystem()) {
-    return false;
-  }
-  if (!LittleFS.exists(AVAILABLE_PINS_PATH)) {
-    return false;
-  }
-  File file = LittleFS.open(AVAILABLE_PINS_PATH, "r");
-  if (!file) {
-    Serial.println("Failed to open available pins catalog for reading.");
-    return false;
-  }
-  ArduinoJson::JsonDocument doc;
-  const DeserializationError error = deserializeJson(doc, file);
-  file.close();
-  if (error) {
-    Serial.printf("Unable to parse available pins catalog: %s\n", error.c_str());
-    return false;
-  }
-  JsonArray arr = doc["pins"].as<JsonArray>();
-  if (arr.isNull()) {
-    return false;
-  }
-  std::vector<uint8_t> pins;
-  pins.reserve(arr.size());
-  for (JsonVariant value : arr) {
-    if (!value.is<int>()) {
-      continue;
-    }
-    const int pin = value.as<int>();
-    if (pin < 0 || pin > 39) {
-      continue;
-    }
-    pins.push_back(static_cast<uint8_t>(pin));
-  }
-  if (pins.empty()) {
-    return false;
-  }
-  pinsOut = std::move(pins);
-  return true;
-}
-
-bool persistDoorPinAssignmentsFile(const DoorPinConfig &config) {
-  if (!ensureFileSystem()) {
-    return false;
-  }
-  File file = LittleFS.open(DOOR_PIN_ASSIGNMENTS_PATH, "w");
-  if (!file) {
-    Serial.println("Failed to open door pin assignment file for writing.");
-    return false;
-  }
-  ArduinoJson::JsonDocument doc;
-  doc["openPin"] = config.openPin;
-  doc["closePin"] = config.closePin;
-  doc["sensorPin"] = config.sensorPin;
-  doc["travelTimeMs"] = config.travelTimeMs;
-  const bool ok = serializeJson(doc, file) > 0;
-  file.close();
-  if (!ok) {
-    Serial.println("Failed to write door pin assignment file.");
-  }
-  return ok;
-}
-
-bool loadDoorPinAssignmentsFile(DoorPinConfig &configOut) {
-  if (!ensureFileSystem() || !LittleFS.exists(DOOR_PIN_ASSIGNMENTS_PATH)) {
-    return false;
-  }
-  File file = LittleFS.open(DOOR_PIN_ASSIGNMENTS_PATH, "r");
-  if (!file) {
-    Serial.println("Failed to open door pin assignment file for reading.");
-    return false;
-  }
-  ArduinoJson::JsonDocument doc;
-  const DeserializationError error = deserializeJson(doc, file);
-  file.close();
-  if (error) {
-    Serial.printf("Unable to parse door pin assignment file: %s\n", error.c_str());
-    return false;
-  }
-  if (!doc["openPin"].is<int>() || !doc["closePin"].is<int>() || !doc["sensorPin"].is<int>()) {
-    Serial.println("Door pin assignment file missing required fields.");
-    return false;
-  }
-  configOut.openPin = static_cast<uint8_t>(doc["openPin"].as<int>());
-  configOut.closePin = static_cast<uint8_t>(doc["closePin"].as<int>());
-  configOut.sensorPin = static_cast<uint8_t>(doc["sensorPin"].as<int>());
-  const JsonVariant travelVariant = doc["travelTimeMs"];
-  uint32_t travelTime = DEFAULT_DOOR_TRAVEL_TIME_MS;
-  if (!travelVariant.isNull()) {
-    if (travelVariant.is<long>()) {
-      const long signedValue = travelVariant.as<long>();
-      if (signedValue >= 0) {
-        travelTime = static_cast<uint32_t>(signedValue);
-      }
-    } else if (travelVariant.is<unsigned long>()) {
-      travelTime = static_cast<uint32_t>(travelVariant.as<unsigned long>());
-    }
-  }
-  configOut.travelTimeMs = travelTime;
-  return true;
-}
-
-void ensureAvailablePinsCatalog() {
-  std::vector<uint8_t> pins;
-  if (loadAvailablePinsFromFile(pins)) {
-    availablePins = pins;
-    Serial.printf("Loaded %u available GPIO pins from catalog.\n",
-                  static_cast<unsigned>(availablePins.size()));
-    return;
-  }
-  pins = detectAvailablePins();
-  if (pins.empty()) {
-    Serial.println("No GPIO pins detected; falling back to safe defaults.");
-    pins.push_back(DEFAULT_DOOR_PIN_ASSIGNMENTS.openPin);
-    pins.push_back(DEFAULT_DOOR_PIN_ASSIGNMENTS.closePin);
-  }
-  availablePins = pins;
-  if (persistAvailablePinsFile(availablePins)) {
-    Serial.printf("Available GPIO pin catalog created with %u entries.\n",
-                  static_cast<unsigned>(availablePins.size()));
-  } else {
-    Serial.println("Failed to persist available GPIO pin catalog.");
-  }
-}
-
-bool validateDoorPinConfig(const DoorPinConfig &config, String &errorCode) {
-  if (!isSupportedGpio(config.openPin)) {
-    errorCode = F("invalid_open_pin");
-    return false;
-  }
-  if (!isSupportedGpio(config.closePin)) {
-    errorCode = F("invalid_close_pin");
-    return false;
-  }
-  if (!isSupportedGpio(config.sensorPin)) {
-    errorCode = F("invalid_sensor_pin");
-    return false;
-  }
-  if (config.openPin == config.closePin || config.openPin == config.sensorPin ||
-      config.closePin == config.sensorPin) {
-    errorCode = F("pin_conflict");
-    return false;
-  }
-  if (config.travelTimeMs < MIN_DOOR_TRAVEL_TIME_MS ||
-      config.travelTimeMs > MAX_DOOR_TRAVEL_TIME_MS) {
-    errorCode = F("invalid_travel_time");
-    return false;
-  }
-  return true;
-}
-
-bool persistDoorPinConfig(const DoorPinConfig &config) {
-  if (!persistDoorPinAssignmentsFile(config)) {
-    Serial.println("Unable to persist door pin configuration (file error).");
-    return false;
-  }
-  Serial.printf("Door config saved (open=%u close=%u sensor=%u travel=%lu ms).\n",
-                static_cast<unsigned>(config.openPin), static_cast<unsigned>(config.closePin),
-                static_cast<unsigned>(config.sensorPin),
-                static_cast<unsigned long>(config.travelTimeMs));
-  return true;
-}
-
-DoorPinConfig readDoorPinConfigFromFile() {
-  DoorPinConfig config = DEFAULT_DOOR_PIN_ASSIGNMENTS;
-  DoorPinConfig stored;
-  if (loadDoorPinAssignmentsFile(stored)) {
-    String error;
-    if (!validateDoorPinConfig(stored, error)) {
-      Serial.printf(
-          "Door pin assignment file invalid (%s). Reverting to defaults (open=%u close=%u sensor=%u travel=%lu ms).\n",
-          error.c_str(), static_cast<unsigned>(DEFAULT_DOOR_PIN_ASSIGNMENTS.openPin),
-          static_cast<unsigned>(DEFAULT_DOOR_PIN_ASSIGNMENTS.closePin),
-          static_cast<unsigned>(DEFAULT_DOOR_PIN_ASSIGNMENTS.sensorPin),
-          static_cast<unsigned long>(DEFAULT_DOOR_PIN_ASSIGNMENTS.travelTimeMs));
-    } else {
-      Serial.printf("Door pin configuration loaded (open=%u close=%u sensor=%u travel=%lu ms).\n",
-                    static_cast<unsigned>(stored.openPin),
-                    static_cast<unsigned>(stored.closePin),
-                    static_cast<unsigned>(stored.sensorPin),
-                    static_cast<unsigned long>(stored.travelTimeMs));
-      return stored;
-    }
-  } else {
-    Serial.println("Door pin assignment file missing; initializing with defaults.");
-  }
-  if (!persistDoorPinAssignmentsFile(config)) {
-    Serial.println("Failed to write default door pin assignment file.");
-  }
-  return config;
-}
-
-void loadDoorPinConfig() {
-  doorPinConfig = readDoorPinConfigFromFile();
-}
-
-void applyDoorPinConfig(const DoorPinConfig &config, bool persist) {
-  DoorPinConfig next = config;
-  String error;
-  if (!validateDoorPinConfig(next, error)) {
-    Serial.printf("Rejected door pin configuration (%s).\n", error.c_str());
-    return;
-  }
-  doorPinConfig = next;
-  if (persist) {
-    persistDoorPinConfig(next);
-  }
-  initDoorHardware(true);
-  resetTemperatureSensors();
-}
-
-String doorPinConfigToJson(bool includeAvailablePins) {
-  String json;
-  json.reserve(includeAvailablePins ? 192 : 96);
-  json += F("{\"openPin\":");
-  json += String(doorPinConfig.openPin);
-  json += F(",\"closePin\":");
-  json += String(doorPinConfig.closePin);
-  json += F(",\"sensorPin\":");
-  json += String(doorPinConfig.sensorPin);
-  json += F(",\"travelTimeMs\":");
-  json += String(doorPinConfig.travelTimeMs);
-  if (includeAvailablePins) {
-    json += F(",\"availablePins\":[");
-    for (size_t idx = 0; idx < availablePins.size(); ++idx) {
-      if (idx > 0) {
-        json += ',';
-      }
-      json += String(static_cast<unsigned>(availablePins[idx]));
-    }
-    json += F("]");
-  }
-  json += F("}");
-  return json;
-}
 
 String chipDescriptor() {
   std::ostringstream oss;
@@ -1086,25 +763,28 @@ DoorCommandResult closeDoor() {
 //==============================================================================
 void resetTemperatureSensors() {
   temperatureSensorsInitialized = false;
-  configuredSensorPin = 0;
+  configuredSensorSdaPin = INVALID_PIN;
+  configuredSensorSclPin = INVALID_PIN;
 }
 
 void initTemperatureSensors() {
   if (TEST_MODE) {
     return;
   }
-  const uint8_t sensorPin = doorPinConfig.sensorPin;
-  if (temperatureSensorsInitialized && configuredSensorPin == sensorPin) {
+  const uint8_t sensorSda = doorPinConfig.sensorPinSda;
+  const uint8_t sensorScl = doorPinConfig.sensorPinScl;
+  if (temperatureSensorsInitialized && configuredSensorSdaPin == sensorSda &&
+      configuredSensorSclPin == sensorScl) {
     return;
   }
-  onewireBus.begin(sensorPin);
-  temperatureBus.begin();
-  temperatureBus.setWaitForConversion(false);
-  if (VERBOSE_LOGS) {
-    Serial.printf("DS18B20 bus initialized on pin %u.\n", static_cast<unsigned>(sensorPin));
-  }
+  greenhouseSensorWire.begin(sensorSda, sensorScl);
+  configuredSensorSdaPin = sensorSda;
+  configuredSensorSclPin = sensorScl;
   temperatureSensorsInitialized = true;
-  configuredSensorPin = sensorPin;
+  if (VERBOSE_LOGS) {
+    Serial.printf("SHT31 sensor bus initialized on SDA=%u SCL=%u.\n",
+                  static_cast<unsigned>(sensorSda), static_cast<unsigned>(sensorScl));
+  }
 }
 
 void initBatteryAdc() {
@@ -1123,18 +803,56 @@ void initBatteryAdc() {
   configured = true;
 }
 
-bool readTemperature(const DeviceAddress address, const char *label, float &valueOut) {
-  const float tempC = temperatureBus.getTempC(address);
-  if (tempC == DEVICE_DISCONNECTED_C) {
-    if (VERBOSE_LOGS) {
-      Serial.printf("Failed to read %s temperature (sensor disconnected?).\n", label);
+uint8_t computeSht31Crc(const uint8_t *data) {
+  uint8_t crc = 0xFF;
+  for (uint8_t idx = 0; idx < 2; ++idx) {
+    crc ^= data[idx];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      if (crc & 0x80) {
+        crc = static_cast<uint8_t>((crc << 1) ^ 0x31);
+      } else {
+        crc = static_cast<uint8_t>(crc << 1);
+      }
+    }
+  }
+  return crc;
+}
+
+bool readSht31Measurement(float &tempC, float &humidityPct) {
+  tempC = NAN;
+  humidityPct = NAN;
+  greenhouseSensorWire.beginTransmission(SHT31_I2C_ADDRESS);
+  greenhouseSensorWire.write(0x24);
+  greenhouseSensorWire.write(0x00);
+  if (greenhouseSensorWire.endTransmission() != 0) {
+    return false;
+  }
+  delay(SHT31_MEASUREMENT_DELAY_MS);
+  constexpr uint8_t EXPECTED_BYTES = 6;
+  const uint8_t received = greenhouseSensorWire.requestFrom(SHT31_I2C_ADDRESS, EXPECTED_BYTES);
+  if (received != EXPECTED_BYTES) {
+    while (greenhouseSensorWire.available()) {
+      greenhouseSensorWire.read();
     }
     return false;
   }
-  valueOut = tempC;
-  if (VERBOSE_LOGS) {
-    Serial.printf("%s temperature: %.2f C\n", label, tempC);
+  uint8_t buffer[EXPECTED_BYTES];
+  for (uint8_t idx = 0; idx < EXPECTED_BYTES; ++idx) {
+    buffer[idx] = greenhouseSensorWire.read();
   }
+  if (computeSht31Crc(buffer) != buffer[2] || computeSht31Crc(buffer + 3) != buffer[5]) {
+    return false;
+  }
+  const uint16_t rawTemp = (static_cast<uint16_t>(buffer[0]) << 8) | buffer[1];
+  const uint16_t rawHumidity = (static_cast<uint16_t>(buffer[3]) << 8) | buffer[4];
+  tempC = -45.0f + 175.0f * (static_cast<float>(rawTemp) / 65535.0f);
+  float humidity = 100.0f * (static_cast<float>(rawHumidity) / 65535.0f);
+  if (humidity < 0.0f) {
+    humidity = 0.0f;
+  } else if (humidity > 100.0f) {
+    humidity = 100.0f;
+  }
+  humidityPct = humidity;
   return true;
 }
 
@@ -1144,15 +862,30 @@ SensorReadings getSensorReadings() {
     return readings;
   }
   initTemperatureSensors();
-  if (VERBOSE_LOGS) {
-    Serial.println("Requesting DS18B20 temperature readings...");
+  if (temperatureSensorsInitialized) {
+    float greenhouseTemp = NAN;
+    float humidity = NAN;
+    if (readSht31Measurement(greenhouseTemp, humidity)) {
+      if (!std::isnan(greenhouseTemp)) {
+        readings.hasGreenhouseTemp = true;
+        readings.greenhouseTempC = greenhouseTemp;
+        if (VERBOSE_LOGS) {
+          Serial.printf("Greenhouse temperature: %.2f C\n", greenhouseTemp);
+        }
+      }
+      if (!std::isnan(humidity)) {
+        readings.hasGreenhouseHumidity = true;
+        readings.greenhouseHumidityPct = humidity;
+        if (VERBOSE_LOGS) {
+          Serial.printf("Greenhouse humidity: %.2f %%\n", humidity);
+        }
+      }
+    } else if (VERBOSE_LOGS) {
+      Serial.println("Failed to read greenhouse sensor data (I2C transaction failed).");
+    }
+  } else if (VERBOSE_LOGS) {
+    Serial.println("SHT31 sensor not initialized; skipping greenhouse readings.");
   }
-  temperatureBus.requestTemperatures();
-  delay(SENSOR_CONVERSION_DELAY_MS);
-
-  readings.hasBatteryTemp = readTemperature(BATTERY_TEMP_ADDRESS, "Battery", readings.batteryTempC);
-  readings.hasGreenhouseTemp =
-      readTemperature(GREENHOUSE_TEMP_ADDRESS, "Greenhouse", readings.greenhouseTempC);
 
   initBatteryAdc();
   const int raw = analogRead(BATTERY_ADC_PIN);
@@ -1182,11 +915,11 @@ void logSensorReadings() {
     return;
   }
   const SensorReadings readings = getSensorReadings();
-  if (!readings.hasBatteryTemp) {
-    Serial.println("Battery temperature reading unavailable.");
-  }
   if (!readings.hasGreenhouseTemp) {
     Serial.println("Greenhouse temperature reading unavailable.");
+  }
+  if (!readings.hasGreenhouseHumidity) {
+    Serial.println("Greenhouse humidity reading unavailable.");
   }
   if (!readings.hasBatteryVoltage) {
     Serial.println("Battery voltage reading unavailable.");
@@ -1683,12 +1416,12 @@ String formatDoorHistoryCsvLine(const DoorHistoryEntry &entry) {
   line += F(",");
   line += doorStateToString(entry.doorState);
   line += F(",");
-  if (entry.hasBatteryTemp) {
-    line += String(entry.batteryTempC, 2);
-  }
-  line += F(",");
   if (entry.hasGreenhouseTemp) {
     line += String(entry.greenhouseTempC, 2);
+  }
+  line += F(",");
+  if (entry.hasGreenhouseHumidity) {
+    line += String(entry.greenhouseHumidityPct, 2);
   }
   line += F(",");
   if (entry.hasBatteryVoltage) {
@@ -1704,7 +1437,7 @@ String formatDoorHistoryCsvLine(const DoorHistoryEntry &entry) {
   return line;
 }
 
-bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut) {
+bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut, bool legacyFormat) {
   String trimmed = line;
   trimmed.trim();
   if (!trimmed.length()) {
@@ -1725,17 +1458,19 @@ bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut) {
   DoorHistoryEntry entry;
   entry.timestamp = static_cast<time_t>(parts[0].toInt());
   entry.doorState = doorStateFromString(parts[2]);
-  if (parts[3].length() > 0) {
-    entry.hasBatteryTemp = true;
-    entry.batteryTempC = parts[3].toFloat();
-  }
-  if (parts[4].length() > 0) {
+  const int greenhouseTempIndex = legacyFormat ? 4 : 3;
+  if (parts[greenhouseTempIndex].length() > 0) {
     entry.hasGreenhouseTemp = true;
-    entry.greenhouseTempC = parts[4].toFloat();
+    entry.greenhouseTempC = parts[greenhouseTempIndex].toFloat();
   }
-  if (parts[5].length() > 0) {
+  if (!legacyFormat && parts[4].length() > 0) {
+    entry.hasGreenhouseHumidity = true;
+    entry.greenhouseHumidityPct = parts[4].toFloat();
+  }
+  const int batteryVoltageIndex = legacyFormat ? 5 : 5;
+  if (parts[batteryVoltageIndex].length() > 0) {
     entry.hasBatteryVoltage = true;
-    entry.batteryVoltage = parts[5].toFloat();
+    entry.batteryVoltage = parts[batteryVoltageIndex].toFloat();
   }
   entry.event = parts[6];
   entryOut = entry;
@@ -1755,14 +1490,16 @@ void loadDoorHistoryFromDisk() {
     return;
   }
   bool headerSkipped = false;
+  bool legacyFormat = false;
   while (file.available()) {
     String line = file.readStringUntil('\n');
     if (!headerSkipped) {
       headerSkipped = true;
+      legacyFormat = line.indexOf(F("battery_temp_c")) >= 0;
       continue;
     }
     DoorHistoryEntry entry;
-    if (parseDoorHistoryCsvLine(line, entry)) {
+    if (parseDoorHistoryCsvLine(line, entry, legacyFormat)) {
       pushDoorHistoryEntry(entry);
       if (entry.timestamp > 0 && entry.event == "hourly") {
         lastHourlyBucket = entry.timestamp - (entry.timestamp % DOOR_HISTORY_HOURLY_SECONDS);
@@ -1789,14 +1526,16 @@ bool rewriteDoorHistoryCsvDisplayTimes() {
   }
   output.print(DOOR_HISTORY_CSV_HEADER);
   bool headerSkipped = false;
+  bool legacyFormat = false;
   while (input.available()) {
     String line = input.readStringUntil('\n');
     if (!headerSkipped) {
       headerSkipped = true;
+      legacyFormat = line.indexOf(F("battery_temp_c")) >= 0;
       continue;
     }
     DoorHistoryEntry entry;
-    if (!parseDoorHistoryCsvLine(line, entry)) {
+    if (!parseDoorHistoryCsvLine(line, entry, legacyFormat)) {
       continue;
     }
     output.print(formatDoorHistoryCsvLine(entry));
@@ -1929,10 +1668,10 @@ bool recordDoorHistory(const char *eventLabel) {
   DoorHistoryEntry entry;
   entry.timestamp = nowTs;
   entry.doorState = getDoorPosition();
-  entry.hasBatteryTemp = readings.hasBatteryTemp;
-  entry.batteryTempC = readings.batteryTempC;
   entry.hasGreenhouseTemp = readings.hasGreenhouseTemp;
   entry.greenhouseTempC = readings.greenhouseTempC;
+  entry.hasGreenhouseHumidity = readings.hasGreenhouseHumidity;
+  entry.greenhouseHumidityPct = readings.greenhouseHumidityPct;
   entry.hasBatteryVoltage = readings.hasBatteryVoltage;
   entry.batteryVoltage = readings.batteryVoltage;
   entry.event = eventLabel ? eventLabel : "event";
@@ -2056,11 +1795,11 @@ String escapeJson(const String &value) {
 
 String sensorReadingsToJson(const SensorReadings &readings) {
   String json;
-  json.reserve(256);
-  json += F("{\"batteryTempC\":");
-  json += readings.hasBatteryTemp ? String(readings.batteryTempC, 2) : F("null");
-  json += F(",\"greenhouseTempC\":");
+  json.reserve(192);
+  json += F("{\"greenhouseTempC\":");
   json += readings.hasGreenhouseTemp ? String(readings.greenhouseTempC, 2) : F("null");
+  json += F(",\"greenhouseHumidityPct\":");
+  json += readings.hasGreenhouseHumidity ? String(readings.greenhouseHumidityPct, 2) : F("null");
   json += F(",\"batteryVoltage\":");
   json += readings.hasBatteryVoltage ? String(readings.batteryVoltage, 2) : F("null");
   json += F("}");
@@ -2231,14 +1970,7 @@ String solarSchedulerStatusToJson(bool includeDeviceMeta) {
   }
   json += F("}");
   if (includeDeviceMeta) {
-    json += F(",\"availablePins\":[");
-    for (size_t idx = 0; idx < availablePins.size(); ++idx) {
-      if (idx > 0) {
-        json += ',';
-      }
-      json += String(static_cast<unsigned>(availablePins[idx]));
-    }
-    json += F("],\"device\":\"");
+    json += F(",\"device\":\"");
     json += escapeJson(chipDescriptor());
     json += F("\"");
   }
@@ -2266,7 +1998,7 @@ void handleApiRoot() {
   String json =
       F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
         "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/api/schedule\","
-        "\"/api/pins\",\"/api/ota\",\"/api/ota/upload\",\"/history.csv\"]}");
+        "\"/api/ota\",\"/api/ota/upload\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -2298,10 +2030,10 @@ void handleDoorHistoryEndpoint() {
     json += String(static_cast<unsigned long>(entry.timestamp));
     json += F(",\"doorState\":\"");
     json += doorStateToString(entry.doorState);
-    json += F("\",\"batteryTempC\":");
-    json += entry.hasBatteryTemp ? String(entry.batteryTempC, 2) : F("null");
-    json += F(",\"greenhouseTempC\":");
+    json += F("\",\"greenhouseTempC\":");
     json += entry.hasGreenhouseTemp ? String(entry.greenhouseTempC, 2) : F("null");
+    json += F(",\"greenhouseHumidityPct\":");
+    json += entry.hasGreenhouseHumidity ? String(entry.greenhouseHumidityPct, 2) : F("null");
     json += F(",\"batteryVoltage\":");
     json += entry.hasBatteryVoltage ? String(entry.batteryVoltage, 2) : F("null");
     json += F(",\"event\":\"");
@@ -2763,71 +2495,6 @@ void handleSolarScheduleUpdate() {
   sendJsonResponse(200, solarSchedulerStatusToJson(true));
 }
 
-void handlePinConfigStatus() {
-  sendJsonResponse(200, doorPinConfigToJson(true));
-}
-
-void handlePinConfigUpdate() {
-  if (!apiServer.hasArg("plain")) {
-    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
-    return;
-  }
-  const String body = apiServer.arg("plain");
-  if (body.isEmpty()) {
-    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
-    return;
-  }
-  ArduinoJson::JsonDocument doc;
-  const DeserializationError error = deserializeJson(doc, body);
-  if (error) {
-    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
-    return;
-  }
-  DoorPinConfig requested = doorPinConfig;
-  bool changed = false;
-  if (!doc["openPin"].isNull()) {
-    requested.openPin = static_cast<uint8_t>(doc["openPin"].as<int>());
-    changed = true;
-  }
-  if (!doc["closePin"].isNull()) {
-    requested.closePin = static_cast<uint8_t>(doc["closePin"].as<int>());
-    changed = true;
-  }
-  if (!doc["sensorPin"].isNull()) {
-    requested.sensorPin = static_cast<uint8_t>(doc["sensorPin"].as<int>());
-    changed = true;
-  }
-  if (!doc["travelTimeMs"].isNull()) {
-    const JsonVariant travelVariant = doc["travelTimeMs"];
-    if (!travelVariant.is<long>() && !travelVariant.is<unsigned long>()) {
-      sendJsonResponse(400, F("{\"error\":\"invalid_travel_time\"}"));
-      return;
-    }
-    const long travelValue = travelVariant.as<long>();
-    if (travelValue < 0) {
-      sendJsonResponse(400, F("{\"error\":\"invalid_travel_time\"}"));
-      return;
-    }
-    requested.travelTimeMs = static_cast<uint32_t>(travelValue);
-    changed = true;
-  }
-  if (!changed) {
-    sendJsonResponse(400, F("{\"error\":\"no_changes\"}"));
-    return;
-  }
-  String validationError;
-  if (!validateDoorPinConfig(requested, validationError)) {
-    String json;
-    json.reserve(48);
-    json += F("{\"error\":\"");
-    json += validationError;
-    json += F("\"}");
-    sendJsonResponse(400, json);
-    return;
-  }
-  applyDoorPinConfig(requested, true);
-  sendJsonResponse(200, doorPinConfigToJson(true));
-}
 
 void announceConfigPortalStatus(bool force) {
   if (!configPortalActive) {
@@ -2981,9 +2648,6 @@ void startApiServer() {
   apiServer.on("/api/schedule", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/schedule", HTTP_GET, handleSolarScheduleStatus);
   apiServer.on("/api/schedule", HTTP_POST, handleSolarScheduleUpdate);
-  apiServer.on("/api/pins", HTTP_OPTIONS, handleOptions);
-  apiServer.on("/api/pins", HTTP_GET, handlePinConfigStatus);
-  apiServer.on("/api/pins", HTTP_POST, handlePinConfigUpdate);
   apiServer.on("/api/ota", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/ota", HTTP_GET, handleOtaStatus);
   apiServer.on("/api/ota/upload", HTTP_OPTIONS, handleOptions);
@@ -3013,9 +2677,7 @@ void setup() {
   WiFi.onEvent(handleWifiEvent);
 
   ensureFileSystem();
-  ensureAvailablePinsCatalog();
   initDoorPreferences();
-  loadDoorPinConfig();
   initDoorHardware(true);
   loadSolarScheduleConfig();
   loadSolarScheduleExecutionState();

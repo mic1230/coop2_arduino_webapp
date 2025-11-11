@@ -89,8 +89,8 @@
                     <tr>
                       <th scope="col">Timestamp</th>
                       <th scope="col">Door</th>
-                      <th scope="col">Battery temp</th>
                       <th scope="col">Greenhouse temp</th>
+                      <th scope="col">Greenhouse humidity</th>
                       <th scope="col">Battery voltage</th>
                       <th scope="col">Event</th>
                     </tr>
@@ -113,12 +113,12 @@
             </div>
             <div class="sensor-grid">
               <div>
-                <span class="label">Battery temp</span>
-                <strong data-battery-temp>--</strong>
-              </div>
-              <div>
                 <span class="label">Greenhouse temp</span>
                 <strong data-greenhouse-temp>--</strong>
+              </div>
+              <div>
+                <span class="label">Greenhouse humidity</span>
+                <strong data-greenhouse-humidity>--</strong>
               </div>
               <div>
                 <span class="label">Battery voltage</span>
@@ -210,68 +210,6 @@
               <div class="timezone-options" data-timezone-options></div>
             </div>
             <p class="subtle small" data-timezone-message hidden></p>
-          </section>
-          <section class="card pin-card" data-pin-card>
-            <div class="card-header">
-              <div>
-                <h2>Hardware pins</h2>
-                <p class="subtle">Choose which GPIO pins control your relays and door sensor.</p>
-              </div>
-            </div>
-            <div class="banner info" data-pin-message hidden></div>
-            <p class="subtle small" data-pin-available-list hidden></p>
-            <form class="settings-form" data-pin-form>
-              <label for="pin-open-input">Open door pin</label>
-              <input
-                id="pin-open-input"
-                type="number"
-                min="0"
-                max="39"
-                inputmode="numeric"
-                placeholder="e.g. 17"
-                data-pin-open-input
-              />
-              <label for="pin-close-input">Close door pin</label>
-              <input
-                id="pin-close-input"
-                type="number"
-                min="0"
-                max="39"
-                inputmode="numeric"
-                placeholder="e.g. 19"
-                data-pin-close-input
-              />
-              <label for="pin-sensor-input">Sensor pin</label>
-              <input
-                id="pin-sensor-input"
-                type="number"
-                min="0"
-                max="39"
-                inputmode="numeric"
-                placeholder="e.g. 2"
-                data-pin-sensor-input
-              />
-              <p class="subtle small">
-                Use unique pins for each connection. Enter GPIO numbers from the list above.
-              </p>
-              <label for="pin-travel-time-input">Door travel time (seconds)</label>
-              <input
-                id="pin-travel-time-input"
-                type="number"
-                min="1"
-                max="600"
-                step="0.1"
-                inputmode="decimal"
-                placeholder="e.g. 50"
-                data-pin-travel-time-input
-              />
-              <p class="subtle small">
-                Sets how long the relays stay energized when opening or closing the door.
-              </p>
-              <div class="settings-actions">
-                <button type="submit" class="action-button" data-pin-submit>Save settings</button>
-              </div>
-            </form>
           </section>
           <section class="card firmware-card" data-firmware-card>
             <div class="card-header">

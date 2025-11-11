@@ -1,9 +1,6 @@
 const POLL_INTERVAL_MS = 5000;
 const COUNTDOWN_TICK_MS = 250;
 const DEFAULT_DOOR_TRAVEL_TIME_MS = 50000;
-const DEFAULT_DOOR_TRAVEL_TIME_SECONDS = DEFAULT_DOOR_TRAVEL_TIME_MS / 1000;
-const MIN_DOOR_TRAVEL_TIME_SECONDS = 1;
-const MAX_DOOR_TRAVEL_TIME_SECONDS = 600;
 const DEFAULT_POMODORO_LENGTH_MS = DEFAULT_DOOR_TRAVEL_TIME_MS;
 const HISTORY_POLL_INTERVAL_MS = 15000;
 const HISTORY_DISPLAY_LIMIT = 30;
@@ -73,19 +70,6 @@ const state = {
   },
   schedulerDirty: false,
   overrideMs: null,
-  pinConfig: null,
-  pinForm: {
-    openPin: '',
-    closePin: '',
-    sensorPin: '',
-    travelTimeSeconds: String(DEFAULT_DOOR_TRAVEL_TIME_SECONDS)
-  },
-  pinFormDirty: false,
-  pinAvailablePins: [],
-  pinLoading: false,
-  pinSaving: false,
-  pinMessage: '',
-  pinMessageType: '',
   firmwareInfo: null,
   otaStatus: null,
   otaStatusLoading: false,
@@ -191,8 +175,8 @@ const elements = {
   testModeChip: document.querySelector('[data-test-mode]'),
   openButton: document.querySelector('[data-open-btn]'),
   closeButton: document.querySelector('[data-close-btn]'),
-  batteryTemp: document.querySelector('[data-battery-temp]'),
   greenhouseTemp: document.querySelector('[data-greenhouse-temp]'),
+  greenhouseHumidity: document.querySelector('[data-greenhouse-humidity]'),
   batteryVoltage: document.querySelector('[data-battery-voltage]'),
   wifiValues: document.querySelector('[data-wifi-values]'),
   wifiSsid: document.querySelector('[data-wifi-ssid]'),
@@ -222,14 +206,6 @@ const elements = {
   timezoneMessage: document.querySelector('[data-timezone-message]'),
   timezoneLabel: document.querySelector('[data-timezone-label]'),
   timezoneOffset: document.querySelector('[data-timezone-offset]'),
-  pinForm: document.querySelector('[data-pin-form]'),
-  pinOpenInput: document.querySelector('[data-pin-open-input]'),
-  pinCloseInput: document.querySelector('[data-pin-close-input]'),
-  pinSensorInput: document.querySelector('[data-pin-sensor-input]'),
-  pinTravelTimeInput: document.querySelector('[data-pin-travel-time-input]'),
-  pinSubmitButton: document.querySelector('[data-pin-submit]'),
-  pinMessage: document.querySelector('[data-pin-message]'),
-  pinAvailableList: document.querySelector('[data-pin-available-list]'),
   schedulerCard: document.querySelector('[data-scheduler-card]'),
   schedulerEnabledChip: document.querySelector('[data-scheduler-enabled-chip]'),
   schedulerNextAction: document.querySelector('[data-scheduler-next-action]'),
@@ -426,11 +402,13 @@ function render() {
     elements.closeButton.textContent = state.commandInFlight === 'close' ? 'Closing...' : 'Close door';
   }
 
-  if (elements.batteryTemp) {
-    elements.batteryTemp.textContent = formatTemp(state.status?.sensors?.batteryTempC);
-  }
   if (elements.greenhouseTemp) {
     elements.greenhouseTemp.textContent = formatTemp(state.status?.sensors?.greenhouseTempC);
+  }
+  if (elements.greenhouseHumidity) {
+    elements.greenhouseHumidity.textContent = formatHumidity(
+      state.status?.sensors?.greenhouseHumidityPct
+    );
   }
   if (elements.batteryVoltage) {
     elements.batteryVoltage.textContent = formatVoltage(state.status?.sensors?.batteryVoltage);
@@ -668,7 +646,6 @@ function render() {
   }
 
   renderWifiScanResults();
-  renderPinSettings();
   renderDoorHistory();
   renderTimezonePicker();
   renderSchedulerPanel();
@@ -702,8 +679,8 @@ function renderDoorHistory() {
       <tr>
         <td>${displayTime}</td>
         <td>${formatHistoryDoorState(entry.doorState)}</td>
-        <td>${formatTemp(entry.batteryTempC)}</td>
         <td>${formatTemp(entry.greenhouseTempC)}</td>
+        <td>${formatHumidity(entry.greenhouseHumidityPct)}</td>
         <td>${formatVoltage(entry.batteryVoltage)}</td>
         <td>${formatHistoryEvent(entry.event)}</td>
       </tr>
@@ -753,71 +730,6 @@ function renderWifiScanResults() {
     }
     container.appendChild(button);
   });
-}
-
-function renderPinSettings() {
-  if (!elements.pinForm) {
-    return;
-  }
-  const settingsActive = state.activeTab === 'settings';
-  const loading = state.pinLoading;
-  const saving = state.pinSaving;
-  const locked = !settingsActive || saving;
-  const availablePins = Array.isArray(state.pinAvailablePins) ? state.pinAvailablePins : [];
-  const form =
-    state.pinForm ?? { openPin: '', closePin: '', sensorPin: '', travelTimeSeconds: '' };
-  const shouldSyncInputs = !state.pinFormDirty;
-  const inputMap = [
-    { element: elements.pinOpenInput, field: 'openPin' },
-    { element: elements.pinCloseInput, field: 'closePin' },
-    { element: elements.pinSensorInput, field: 'sensorPin' },
-    { element: elements.pinTravelTimeInput, field: 'travelTimeSeconds' }
-  ];
-  inputMap.forEach(({ element, field }) => {
-    if (!element) {
-      return;
-    }
-    const nextValue = form[field] ?? '';
-    if (shouldSyncInputs && element.value !== nextValue) {
-      element.value = nextValue;
-    }
-    element.disabled = locked || loading;
-  });
-  if (elements.pinAvailableList) {
-    let availableText = '';
-    if (loading && !availablePins.length) {
-      availableText = 'Loading available pins...';
-    } else if (availablePins.length) {
-      availableText = `Available pins: ${availablePins.join(', ')}`;
-    } else {
-      availableText = 'Controller did not report any available GPIOs.';
-    }
-    elements.pinAvailableList.hidden = !settingsActive;
-    if (settingsActive) {
-      elements.pinAvailableList.textContent = availableText;
-    }
-  }
-  if (elements.pinSubmitButton) {
-    const fieldsFilled = inputMap.every(({ field }) => Boolean((form[field] ?? '').trim()));
-    const canSubmit =
-      settingsActive && fieldsFilled && state.pinFormDirty && !loading && !saving;
-    elements.pinSubmitButton.disabled = !canSubmit;
-    elements.pinSubmitButton.textContent = saving ? 'Saving...' : 'Save settings';
-  }
-  if (elements.pinMessage) {
-    let messageText = state.pinMessage;
-    let messageType = state.pinMessageType || 'info';
-    if (!messageText && loading && settingsActive) {
-      messageText = 'Loading pin configuration...';
-      messageType = 'info';
-    }
-    const showMessage = settingsActive && Boolean(messageText);
-    elements.pinMessage.hidden = !showMessage;
-    if (showMessage) {
-      elements.pinMessage.textContent = messageText;
-      elements.pinMessage.className = `banner ${messageType}`;
-    }
-  }
 }
 
 function renderTimezonePicker() {
@@ -1088,6 +1000,10 @@ function formatTemp(value) {
   return value == null ? '--' : `${Number(value).toFixed(1)}\u00B0C`;
 }
 
+function formatHumidity(value) {
+  return value == null ? '--' : `${Number(value).toFixed(1)}%`;
+}
+
 function formatVoltage(value) {
   return value == null ? '--' : `${Number(value).toFixed(2)} V`;
 }
@@ -1138,29 +1054,6 @@ function deriveOtaStatusChip(status, uploading) {
     return { label: 'Failed', tone: 'danger' };
   }
   return { label: 'Idle', tone: 'info' };
-}
-
-function describePinError(code) {
-  switch (code) {
-    case 'invalid_open_pin':
-      return 'Select a supported GPIO for the open relay pin.';
-    case 'invalid_close_pin':
-      return 'Select a supported GPIO for the close relay pin.';
-    case 'invalid_sensor_pin':
-      return 'Select a supported GPIO for the sensor pin.';
-    case 'pin_conflict':
-      return 'Each pin must be unique.';
-    case 'missing_body':
-      return 'Request body is missing.';
-    case 'invalid_json':
-      return 'Pin update payload is invalid.';
-    case 'no_changes':
-      return 'Adjust a pin value before saving.';
-    case 'invalid_travel_time':
-      return `Door travel time must be between ${MIN_DOOR_TRAVEL_TIME_SECONDS} and ${MAX_DOOR_TRAVEL_TIME_SECONDS} seconds.`;
-    default:
-      return 'Unable to update pin configuration.';
-  }
 }
 
 function formatTravelTimeInputValue(travelTimeMs) {
@@ -1474,180 +1367,6 @@ async function handleSchedulerSubmit(event) {
   }
 }
 
-function applyPinConfig(payload, options = {}) {
-  const availablePins = Array.isArray(payload?.availablePins)
-    ? payload.availablePins
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value))
-    : state.pinAvailablePins;
-  const nextState = {
-    pinConfig: payload,
-    pinAvailablePins: availablePins,
-    pinLoading: false
-  };
-  const shouldSyncForm = !state.pinFormDirty || options.forceFormUpdate;
-  if (shouldSyncForm) {
-    const travelTimeMs = Number(payload?.travelTimeMs);
-    nextState.pinForm = {
-      openPin: payload?.openPin == null ? '' : String(payload.openPin),
-      closePin: payload?.closePin == null ? '' : String(payload.closePin),
-      sensorPin: payload?.sensorPin == null ? '' : String(payload.sensorPin),
-      travelTimeSeconds:
-        Number.isFinite(travelTimeMs) && travelTimeMs > 0
-          ? formatTravelTimeInputValue(travelTimeMs)
-          : String(DEFAULT_DOOR_TRAVEL_TIME_SECONDS)
-    };
-    nextState.pinFormDirty = false;
-  }
-  setState(nextState);
-}
-
-async function fetchPinConfig(force = false) {
-  if (state.pinLoading && !force) {
-    return;
-  }
-  setState({ pinLoading: true, pinMessage: '', pinMessageType: '' });
-  try {
-    const response = await fetch(buildEndpoint('/api/pins'), { cache: 'no-cache' });
-    const text = await response.text();
-    let payload = null;
-    if (text) {
-      try {
-        payload = JSON.parse(text);
-      } catch (parseError) {
-        throw new Error('Unable to parse pin configuration.');
-      }
-    }
-    if (!response.ok) {
-      const message = payload?.error
-        ? describePinError(payload.error)
-        : `Pin request failed with HTTP ${response.status}`;
-      throw new Error(message);
-    }
-    if (!payload) {
-      throw new Error('Pin configuration payload missing.');
-    }
-    applyPinConfig(payload, { forceFormUpdate: !state.pinFormDirty });
-  } catch (error) {
-    console.error(error);
-    setState({
-      pinLoading: false,
-      pinMessage: error?.message ?? 'Unable to load pin configuration.',
-      pinMessageType: 'error'
-    });
-  }
-}
-
-function updatePinFormField(field, value) {
-  const nextValue = value == null ? '' : String(value).trim();
-  if (state.pinForm?.[field] === nextValue && state.pinFormDirty) {
-    return;
-  }
-  setState({
-    pinForm: { ...state.pinForm, [field]: nextValue },
-    pinFormDirty: true,
-    pinMessage: '',
-    pinMessageType: ''
-  });
-}
-
-async function handlePinFormSubmit(event) {
-  event.preventDefault();
-  if (state.pinSaving) {
-    return;
-  }
-  const form = state.pinForm ?? {};
-  const fields = ['openPin', 'closePin', 'sensorPin'];
-  const payload = {};
-  for (const field of fields) {
-    const value = (form[field] ?? '').trim();
-    if (!value) {
-      setState({
-        pinMessage: 'Specify all door GPIO pins.',
-        pinMessageType: 'error'
-      });
-      return;
-    }
-    const parsed = Number(value);
-    if (!Number.isInteger(parsed)) {
-      setState({
-        pinMessage: 'Pins must be numeric GPIO values.',
-        pinMessageType: 'error'
-      });
-      return;
-    }
-    payload[field] = parsed;
-  }
-  const travelTimeValue = (form.travelTimeSeconds ?? '').trim();
-  if (!travelTimeValue) {
-    setState({
-      pinMessage: 'Enter the door travel time.',
-      pinMessageType: 'error'
-    });
-    return;
-  }
-  const travelSeconds = Number(travelTimeValue);
-  if (!Number.isFinite(travelSeconds)) {
-    setState({
-      pinMessage: 'Door travel time must be a number in seconds.',
-      pinMessageType: 'error'
-    });
-    return;
-  }
-  if (
-    travelSeconds < MIN_DOOR_TRAVEL_TIME_SECONDS ||
-    travelSeconds > MAX_DOOR_TRAVEL_TIME_SECONDS
-  ) {
-    setState({
-      pinMessage: `Door travel time must be between ${MIN_DOOR_TRAVEL_TIME_SECONDS} and ${MAX_DOOR_TRAVEL_TIME_SECONDS} seconds.`,
-      pinMessageType: 'error'
-    });
-    return;
-  }
-  payload.travelTimeMs = Math.round(travelSeconds * 1000);
-  setState({ pinSaving: true, pinMessage: '', pinMessageType: '' });
-  try {
-    const response = await fetch(buildEndpoint('/api/pins'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-cache',
-      body: JSON.stringify(payload)
-    });
-    const text = await response.text();
-    let body = null;
-    if (text) {
-      try {
-        body = JSON.parse(text);
-      } catch (parseError) {
-        throw new Error('Unable to parse controller response.');
-      }
-    }
-    if (!response.ok) {
-      const message = body?.error
-        ? describePinError(body.error)
-        : `Pin update failed with HTTP ${response.status}`;
-      throw new Error(message);
-    }
-    if (!body) {
-      throw new Error('Controller did not return the updated pins.');
-    }
-    applyPinConfig(body, { forceFormUpdate: true });
-    setState({
-      pinSaving: false,
-      pinMessage: 'Door settings saved.',
-      pinMessageType: 'success',
-      pinFormDirty: false
-    });
-  } catch (error) {
-    console.error(error);
-    setState({
-      pinSaving: false,
-      pinMessage: error?.message ?? 'Unable to save door settings.',
-      pinMessageType: 'error'
-    });
-  }
-}
-
 function handleOtaFileChange(event) {
   const file = event?.target?.files?.[0];
   if (!file) {
@@ -1811,9 +1530,6 @@ function activateTab(tabName) {
   }
   if (tabName === 'settings' && !state.schedulerStatus && !state.schedulerLoading) {
     fetchSchedulerConfig();
-  }
-  if (tabName === 'settings' && !state.pinConfig && !state.pinLoading) {
-    fetchPinConfig();
   }
   if (tabName === 'settings' && !state.firmwareInfo && !state.otaStatusLoading) {
     fetchFirmwareStatus();
@@ -2458,28 +2174,6 @@ document.addEventListener('click', (event) => {
   if (Object.keys(nextPatch).length > 0) {
     setState(nextPatch);
   }
-});
-
-if (elements.pinForm) {
-  elements.pinForm.addEventListener('submit', handlePinFormSubmit);
-}
-const pinFieldMap = [
-  { element: elements.pinOpenInput, field: 'openPin' },
-  { element: elements.pinCloseInput, field: 'closePin' },
-  { element: elements.pinSensorInput, field: 'sensorPin' },
-  { element: elements.pinTravelTimeInput, field: 'travelTimeSeconds' }
-];
-pinFieldMap.forEach(({ element, field }) => {
-  if (!element) {
-    return;
-  }
-  const handleFieldChange = (event) => {
-    updatePinFormField(field, event.target.value);
-  };
-  // Listen for multiple events to capture changes across browsers and input types.
-  ['input', 'change', 'keyup'].forEach((eventName) => {
-    element.addEventListener(eventName, handleFieldChange);
-  });
 });
 
 window.addEventListener('beforeunload', () => {
