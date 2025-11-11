@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coop Door</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+    <link rel="stylesheet" href="./styles.css?v=20251110.4" />
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <div>
+          <h1>Coop Door</h1>
+          <p class="subtle" data-last-updated>Waiting for controller&hellip;</p>
+        </div>
+        <div class="header-actions">
+          <button type="button" class="ghost" id="refresh-btn">Refresh</button>
+        </div>
+      </header>
+
+      <div class="tab-bar" role="tablist">
+        <button type="button" class="tab-button active" data-tab-btn="dashboard" role="tab" aria-selected="true">
+          Overview
+        </button>
+        <button type="button" class="tab-button" data-tab-btn="settings" role="tab" aria-selected="false">
+          Settings
+        </button>
+      </div>
+
+      <section data-dashboard-panel>
+        <section class="loading-panel" data-loading>
+          <div class="spinner" aria-hidden="true"></div>
+          <p>Connecting to the coop controller...</p>
+        </section>
+
+        <div class="banner info status-hint" data-status-hint hidden role="status">
+          Syncing with controller...
+        </div>
+
+        <div class="banner error" data-error hidden role="status"></div>
+
+        <section class="cards" data-cards hidden>
+          <article class="card door-card">
+            <div class="card-header">
+              <h2>Door status</h2>
+              <span class="status-chip" data-door-chip>unknown</span>
+            </div>
+            <dl class="key-values single">
+              <div>
+                <dt>Current time</dt>
+                <dd data-current-time>--</dd>
+              </div>
+            </dl>
+            <div class="countdown" data-countdown hidden>
+              <div class="countdown-header">
+                <span class="label">Countdown</span>
+                <strong data-countdown-value>--</strong>
+              </div>
+              <div class="countdown-bar" data-countdown-bar hidden>
+                <div class="fill" data-countdown-fill style="width: 0%"></div>
+              </div>
+              <small class="subtle" data-countdown-meta>Targeting --</small>
+            </div>
+            <p class="chip warning" data-test-mode hidden>
+              Test mode is enabled &mdash; relays are not energized.
+            </p>
+            <div class="actions">
+              <button type="button" class="action-button" data-open-btn>Open door</button>
+              <button type="button" class="action-button" data-close-btn>Close door</button>
+            </div>
+            <div class="override-banner" data-override-banner hidden>
+              <span>Override active</span>
+              <strong data-override-countdown>--</strong>
+            </div>
+            <div class="door-history">
+              <div class="door-history-header">
+                <div>
+                  <h3>Door history</h3>
+                  <p class="subtle">Last door changes and hourly snapshots</p>
+                </div>
+                <button type="button" class="ghost small" data-download-history>
+                  Download CSV
+                </button>
+              </div>
+              <div class="door-history-table-wrapper">
+                <table class="door-history-table" aria-label="Door history">
+                  <thead>
+                    <tr>
+                      <th scope="col">Timestamp</th>
+                      <th scope="col">Door</th>
+                      <th scope="col">Greenhouse temp</th>
+                      <th scope="col">Greenhouse humidity</th>
+                      <th scope="col">Battery voltage</th>
+                      <th scope="col">Event</th>
+                    </tr>
+                  </thead>
+                  <tbody data-door-history-body>
+                    <tr>
+                      <td colspan="6" class="empty-history">
+                        History will appear once data is available.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </article>
+
+          <article class="card sensor-card">
+            <div class="card-header">
+              <h2>Sensors</h2>
+            </div>
+            <div class="sensor-grid">
+              <div>
+                <span class="label">Greenhouse temp</span>
+                <strong data-greenhouse-temp>--</strong>
+              </div>
+              <div>
+                <span class="label">Greenhouse humidity</span>
+                <strong data-greenhouse-humidity>--</strong>
+              </div>
+              <div>
+                <span class="label">Battery voltage</span>
+                <strong data-battery-voltage>--</strong>
+              </div>
+            </div>
+          </article>
+
+          <article class="card wifi-card">
+            <div class="card-header">
+              <h2>Wi-Fi</h2>
+            </div>
+            <dl class="key-values" data-wifi-values>
+              <div>
+                <dt>SSID</dt>
+                <dd data-wifi-ssid>--</dd>
+              </div>
+              <div>
+                <dt>IP address</dt>
+                <dd data-wifi-ip>--</dd>
+              </div>
+              <div>
+                <dt>Signal</dt>
+                <dd data-wifi-signal>--</dd>
+              </div>
+            </dl>
+            <p class="subtle" data-wifi-empty hidden>Not connected.</p>
+          </article>
+        </section>
+      </section>
+
+      <section class="settings-panel" data-settings-panel hidden>
+        <article class="card settings-card">
+          <div class="card-header">
+            <div>
+              <h2>Wi-Fi settings</h2>
+              <p class="subtle">Configure how the controller connects to your network.</p>
+            </div>
+            <span class="chip info" data-wifi-ap-badge hidden>Access point mode</span>
+          </div>
+          <div class="banner info" data-wifi-message hidden></div>
+          <form class="settings-form" data-wifi-form>
+            <label for="wifi-ssid-input">Wi-Fi SSID</label>
+            <input
+              id="wifi-ssid-input"
+              name="wifi-ssid"
+              type="text"
+              placeholder="Network name"
+              autocomplete="off"
+              data-wifi-ssid-input
+            />
+            <div class="scan-row">
+              <button type="button" class="ghost small" data-wifi-scan>Scan networks</button>
+              <span class="subtle small">Tap a result to fill the SSID.</span>
+            </div>
+            <div class="scan-results" data-wifi-scan-results></div>
+            <label for="wifi-password-input">Password</label>
+            <input
+              id="wifi-password-input"
+              name="wifi-password"
+              type="password"
+              placeholder="Leave empty for open network"
+              data-wifi-password-input
+            />
+            <label for="wifi-retain-select">RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT</label>
+            <select id="wifi-retain-select" data-wifi-retain-select>
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+            <p class="subtle small">
+              When set to "No", the controller forgets saved Wi-Fi credentials every time it restarts.
+            </p>
+            <div class="settings-actions">
+              <button type="submit" class="action-button" data-wifi-submit>Save settings</button>
+            </div>
+          </form>
+          <section class="timezone-section" data-timezone-section>
+            <div class="timezone-header">
+              <h3>Device timezone</h3>
+              <p class="subtle small">
+                Pick the timezone the controller uses for its clock, on-screen history, and exports.
+              </p>
+            </div>
+            <button type="button" class="timezone-trigger" data-timezone-trigger>
+              <span class="timezone-label" data-timezone-label>UTC</span>
+              <span class="timezone-offset" data-timezone-offset>UTC±00:00</span>
+            </button>
+            <div class="timezone-picker" data-timezone-picker hidden>
+              <div class="timezone-options" data-timezone-options></div>
+            </div>
+            <p class="subtle small" data-timezone-message hidden></p>
+          </section>
+          <section class="card firmware-card" data-firmware-card>
+            <div class="card-header">
+              <div>
+                <h2>Firmware &amp; OTA</h2>
+                <p class="subtle">Review the current build and upload updates over Wi-Fi.</p>
+              </div>
+              <span class="chip info" data-ota-status-chip>Idle</span>
+            </div>
+            <dl class="key-values firmware-values">
+              <div>
+                <dt>Device</dt>
+                <dd data-firmware-device>--</dd>
+              </div>
+              <div>
+                <dt>Build</dt>
+                <dd data-firmware-build>--</dd>
+              </div>
+              <div>
+                <dt>Sketch</dt>
+                <dd data-firmware-sketch>--</dd>
+              </div>
+              <div>
+                <dt>OTA space</dt>
+                <dd data-firmware-space>--</dd>
+              </div>
+            </dl>
+            <p class="subtle small firmware-meta">
+              Partition <strong data-firmware-partition>--</strong> &middot; Next
+              <strong data-firmware-next>--</strong> &middot; MD5
+              <code data-firmware-hash>--</code>
+            </p>
+            <form class="ota-form" data-ota-form>
+              <label class="file-input">
+                <span>Firmware bundle (.bin)</span>
+                <input type="file" accept=".bin,application/octet-stream" data-ota-file />
+              </label>
+              <p class="subtle small" data-ota-file-meta>No firmware selected.</p>
+              <div class="ota-progress" data-ota-progress hidden>
+                <div class="fill" data-ota-progress-fill></div>
+                <span data-ota-progress-label>0%</span>
+              </div>
+              <div class="banner info" data-ota-message hidden></div>
+              <div class="settings-actions">
+                <button type="submit" class="action-button" data-ota-upload>Upload firmware</button>
+                <button type="button" class="ghost small" data-ota-clear>Clear</button>
+              </div>
+              <p class="subtle small">
+                Upload the compiled <code>.bin</code> from PlatformIO. Keep this page open until the controller reboots.
+              </p>
+            </form>
+          </section>
+        <section class="card scheduler-card" data-scheduler-card hidden>
+          <div class="card-header">
+            <div>
+              <h2>Door automation</h2>
+              <p class="subtle">Automatically run the door around sunrise and sunset.</p>
+            </div>
+            <div class="automation-status" data-scheduler-enabled-chip>Automation disabled</div>
+          </div>
+          <div class="scheduler-summary">
+            <div class="summary-card next-action">
+              <span class="label">Next action</span>
+              <strong data-scheduler-next-action>--</strong>
+            </div>
+            <div class="summary-card sunrise">
+              <span class="label">Sunrise</span>
+              <strong data-scheduler-sunrise-time>--</strong>
+            </div>
+            <div class="summary-card open-target">
+              <span class="label">Door open target</span>
+              <strong data-scheduler-open-time>--</strong>
+            </div>
+            <div class="summary-card sunset">
+              <span class="label">Sunset</span>
+              <strong data-scheduler-sunset-time>--</strong>
+            </div>
+            <div class="summary-card close-target">
+              <span class="label">Door close target</span>
+              <strong data-scheduler-close-time>--</strong>
+            </div>
+          </div>
+          <div class="scheduler-history">
+            <div>
+              <span class="label">Last open</span>
+              <strong data-scheduler-last-open>--</strong>
+            </div>
+            <div>
+              <span class="label">Last close</span>
+              <strong data-scheduler-last-close>--</strong>
+            </div>
+          </div>
+          <div class="banner info" data-scheduler-message hidden></div>
+          <div class="banner error" data-scheduler-error hidden></div>
+          <form class="settings-form" data-scheduler-form>
+            <label class="scheduler-toggle">
+              <span>Sunrise/sunset automation</span>
+              <select data-scheduler-enabled-select>
+                <option value="" selected>Select&hellip;</option>
+                <option value="true">Enable</option>
+                <option value="false">Disable</option>
+              </select>
+            </label>
+            <label>
+              Search location
+              <div class="geo-controls">
+                <select data-geo-country>
+                  <option value="">All countries</option>
+                  <option value="US" selected>United States</option>
+                  <option value="CA">Canada</option>
+                  <option value="GB">United Kingdom</option>
+                  <option value="AU">Australia</option>
+                  <option value="NZ">New Zealand</option>
+                  <option value="RO">Romania</option>
+                  <option value="DE">Germany</option>
+                  <option value="FR">France</option>
+                  <option value="ES">Spain</option>
+                  <option value="IT">Italy</option>
+                </select>
+                <div class="geo-autocomplete">
+                  <input
+                    type="text"
+                    autocomplete="off"
+                    placeholder="City, State or City, Country"
+                    data-geo-input
+                  />
+                  <div class="geo-suggest" data-geo-suggest hidden></div>
+                </div>
+              </div>
+              <p class="subtle small">Pick a match to fill coordinates.</p>
+            </label>
+            <div class="grid">
+              <label>
+                Latitude
+                <input type="text" inputmode="decimal" autocomplete="off" data-scheduler-latitude-input />
+              </label>
+              <label>
+                Longitude
+                <input type="text" inputmode="decimal" autocomplete="off" data-scheduler-longitude-input />
+              </label>
+            </div>
+            <div class="grid">
+              <label>
+                Sunrise offset (minutes)
+                <input type="number" inputmode="numeric" data-scheduler-sunrise-offset-input />
+              </label>
+              <label>
+                Sunset offset (minutes)
+                <input type="number" inputmode="numeric" data-scheduler-sunset-offset-input />
+              </label>
+            </div>
+            <p class="subtle small">
+              Offsets are counted in minutes from the actual sunrise/sunset. A value of
+              <strong>1</strong> waits one minute after the event, while <strong>-1</strong> runs one
+              minute before.
+            </p>
+            <div class="scheduler-actions">
+              <button type="button" class="ghost small" data-scheduler-refresh>Reload schedule</button>
+              <button type="submit" class="action-button" data-scheduler-save>Save schedule</button>
+            </div>
+          </form>
+        </section>
+          <p class="subtle small" data-wifi-ap-hint hidden></p>
+          <p class="subtle small" data-wifi-config-meta></p>
+        </article>
+      </section>
+    </main>
+    <script src="./app.js?v=20251110.4" type="module"></script>
+  </body>
+</html>
