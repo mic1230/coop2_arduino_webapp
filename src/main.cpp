@@ -136,7 +136,7 @@ constexpr uint8_t INVALID_PIN = 0xFF;
 constexpr size_t DOOR_HISTORY_CSV_BUFFER_LIMIT = 128;
 constexpr size_t DOOR_HISTORY_DISPLAY_LIMIT = 30;
 constexpr const char *DOOR_HISTORY_CSV_PATH = "/door_history.csv";
-constexpr size_t DOOR_HISTORY_MAX_BYTES = 1024 * 1024;
+constexpr size_t DOOR_HISTORY_MAX_BYTES = 25 * 1024;
 constexpr uint32_t DOOR_HISTORY_HOURLY_SECONDS = 60 * 60;
 constexpr const char *DOOR_HISTORY_CSV_HEADER =
     "timestamp,display_time,door_state,greenhouse_temp_c,greenhouse_humidity_pct,battery_voltage,event\n";
@@ -382,6 +382,7 @@ uint8_t configuredRelayClosePin = 0;
 bool temperatureSensorsInitialized = false;
 uint8_t configuredSensorSdaPin = INVALID_PIN;
 uint8_t configuredSensorSclPin = INVALID_PIN;
+bool otaSupported = true;
 
 struct DoorHistoryEntry {
   time_t timestamp = 0;
@@ -692,9 +693,11 @@ String firmwareMetadataToJson() {
 
 String otaStatusToJson() {
   String json;
-  json.reserve(320);
+  json.reserve(360);
   json += F("{\"inProgress\":");
   json += otaUpdateState.active ? F("true") : F("false");
+  json += F(",\"supported\":");
+  json += otaSupported ? F("true") : F("false");
   json += F(",\"receivedBytes\":");
   json += String(otaUpdateState.receivedBytes);
   json += F(",\"totalBytes\":");
@@ -2343,6 +2346,10 @@ void handleOtaStatus() {
 }
 
 void handleOtaUploadRequest() {
+  if (!otaSupported) {
+    sendJsonResponse(400, F("{\"status\":\"unsupported\"}"));
+    return;
+  }
   if (otaUpdateState.active) {
     sendJsonResponse(202, F("{\"status\":\"in_progress\"}"));
     return;
@@ -2991,6 +2998,10 @@ void setup() {
   resetOtaTrackingState();
   Serial.println("Booting coop door controller...");
   WiFi.onEvent(handleWifiEvent);
+  otaSupported = esp_ota_get_next_update_partition(nullptr) != nullptr;
+  if (!otaSupported) {
+    Serial.println("OTA updates not supported with current partition table (single app slot).");
+  }
 
   ensureFileSystem();
   initDoorPreferences();
