@@ -706,9 +706,9 @@ function renderPowerSavingCard() {
   if (!elements.powerCard) {
     return;
   }
-  const dashboardActive = state.activeTab === 'dashboard';
-  elements.powerCard.hidden = !dashboardActive || !state.initialized;
-  if (!dashboardActive || !state.initialized) {
+  const settingsActive = state.activeTab === 'settings';
+  elements.powerCard.hidden = !settingsActive || !state.initialized;
+  if (!settingsActive || !state.initialized) {
     return;
   }
   const status = powerSavingStatus();
@@ -823,7 +823,7 @@ function renderModemSleep() {
   if (!elements.powerCard) {
     return;
   }
-  const dashboardActive = state.activeTab === 'dashboard';
+  const settingsActive = state.activeTab === 'settings';
   const status = normalizeModemSleepStatus(modemSleepStatus());
   const form = state.modemSleepForm ?? {};
   const locked = state.modemSleepSaving;
@@ -838,7 +838,7 @@ function renderModemSleep() {
   }
   if (elements.modemSaveButton) {
     const canSave = !locked && state.modemSleepDirty;
-    elements.modemSaveButton.disabled = !canSave || !dashboardActive;
+    elements.modemSaveButton.disabled = !canSave || !settingsActive;
     elements.modemSaveButton.textContent = locked ? 'Saving...' : 'Save modem sleep';
   }
   if (elements.modemResetButton) {

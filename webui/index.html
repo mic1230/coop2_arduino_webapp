@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Coop Door</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
-    <link rel="stylesheet" href="./styles.css?v=20251123.1" />
+    <link rel="stylesheet" href="./styles.css?v=20251123.2" />
   </head>
   <body>
     <main class="page container">
@@ -146,80 +146,6 @@
             </div>
             </dl>
             <p class="subtle" data-wifi-empty hidden>Not connected.</p>
-          </article>
-
-          <article class="card power-card" data-power-card>
-            <div class="card-header">
-              <div>
-                <h2>Power saving</h2>
-                <p class="subtle">Toggle deep sleep cycles to conserve battery.</p>
-              </div>
-              <span class="chip" data-power-chip>Off</span>
-            </div>
-            <div class="power-summary">
-              <div>
-                <span class="label">Mode</span>
-                <strong data-power-status>--</strong>
-                <p class="subtle small" data-power-blockers hidden></p>
-              </div>
-              <div>
-                <span class="label">Next sleep</span>
-                <strong data-power-next>--</strong>
-                <p class="subtle small" data-power-eta>--</p>
-              </div>
-              <div>
-                <span class="label">Deep sleep</span>
-                <strong data-power-sleep-display>--</strong>
-                <p class="subtle small">Min awake 30s per cycle</p>
-              </div>
-            </div>
-            <form class="power-form" data-power-form>
-              <label class="power-toggle">
-                <span>Enable power saving</span>
-                <input type="checkbox" role="switch" data-power-toggle />
-              </label>
-              <label>
-                Deep sleep seconds (1-200)
-                <input
-                  type="number"
-                  min="1"
-                  max="200"
-                  inputmode="numeric"
-                  data-power-sleep-input
-                />
-              </label>
-              <div class="power-actions">
-                <button type="submit" class="action-button" data-power-save>
-                  Save power settings
-                </button>
-                <button type="button" class="ghost small" data-power-reset>Reset</button>
-              </div>
-            </form>
-            <div class="banner info" data-power-message hidden></div>
-            <div class="banner error" data-power-error hidden></div>
-
-            <div class="modem-card">
-              <div class="card-header">
-                <div>
-                  <h3>Modem sleep</h3>
-                  <p class="subtle small">Reduce Wi‑Fi power draw between packets. Default off.</p>
-                </div>
-              </div>
-              <form class="power-form" data-modem-form>
-                <label class="power-toggle">
-                  <span>Enable modem sleep</span>
-                  <input type="checkbox" role="switch" data-modem-toggle />
-                </label>
-                <div class="power-actions">
-                  <button type="submit" class="action-button" data-modem-save>
-                    Save modem sleep
-                  </button>
-                  <button type="button" class="ghost small" data-modem-reset>Reset</button>
-                </div>
-              </form>
-              <div class="banner info" data-modem-message hidden></div>
-              <div class="banner error" data-modem-error hidden></div>
-            </div>
           </article>
         </section>
       </section>
@@ -449,8 +375,82 @@
           <p class="subtle small" data-wifi-ap-hint hidden></p>
           <p class="subtle small" data-wifi-config-meta></p>
         </article>
+
+        <article class="card power-card" data-power-card>
+          <div class="card-header">
+            <div>
+              <h2>Power saving</h2>
+              <p class="subtle">Toggle deep sleep cycles to conserve battery.</p>
+            </div>
+            <span class="chip" data-power-chip>Off</span>
+          </div>
+          <div class="power-summary">
+            <div>
+              <span class="label">Mode</span>
+              <strong data-power-status>--</strong>
+              <p class="subtle small" data-power-blockers hidden></p>
+            </div>
+            <div>
+              <span class="label">Next sleep</span>
+              <strong data-power-next>--</strong>
+              <p class="subtle small" data-power-eta>--</p>
+            </div>
+            <div>
+              <span class="label">Deep sleep</span>
+              <strong data-power-sleep-display>--</strong>
+              <p class="subtle small">Min awake 30s per cycle</p>
+            </div>
+          </div>
+          <form class="power-form" data-power-form>
+            <label class="power-toggle">
+              <span>Enable power saving</span>
+              <input type="checkbox" role="switch" data-power-toggle />
+            </label>
+            <label>
+              Deep sleep seconds (1-200)
+              <input
+                type="number"
+                min="1"
+                max="200"
+                inputmode="numeric"
+                data-power-sleep-input
+              />
+            </label>
+            <div class="power-actions">
+              <button type="submit" class="action-button" data-power-save>
+                Save power settings
+              </button>
+              <button type="button" class="ghost small" data-power-reset>Reset</button>
+            </div>
+          </form>
+          <div class="banner info" data-power-message hidden></div>
+          <div class="banner error" data-power-error hidden></div>
+
+          <div class="modem-card">
+            <div class="card-header">
+              <div>
+                <h3>Modem sleep</h3>
+                <p class="subtle small">Reduce Wi‑Fi power draw between packets. Default off.</p>
+              </div>
+            </div>
+            <form class="power-form" data-modem-form>
+              <label class="power-toggle">
+                <span>Enable modem sleep</span>
+                <input type="checkbox" role="switch" data-modem-toggle />
+              </label>
+              <div class="power-actions">
+                <button type="submit" class="action-button" data-modem-save>
+                  Save modem sleep
+                </button>
+                <button type="button" class="ghost small" data-modem-reset>Reset</button>
+              </div>
+            </form>
+            <div class="banner info" data-modem-message hidden></div>
+            <div class="banner error" data-modem-error hidden></div>
+          </div>
+        </article>
       </section>
     </main>
-    <script src="./app.js?v=20251123.1" type="module"></script>
+    <script src="./app.js?v=20251123.2" type="module"></script>
   </body>
 </html>
