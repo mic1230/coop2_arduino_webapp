@@ -91,7 +91,25 @@ const state = {
   modemSleepMessage: '',
   modemSleepError: '',
   overrideMs: null,
-  firmwareInfo: null
+  firmwareInfo: null,
+  mqttConfig: null,
+  mqttConfigLoading: false,
+  mqttSaving: false,
+  mqttMessage: '',
+  mqttError: '',
+  mqttForm: {
+    host: '',
+    port: '1883',
+    username: '',
+    password: ''
+  },
+  mqttFormDirty: false,
+  mqttPublishForm: {
+    topic: '',
+    stream: 'batteryVoltage'
+  },
+  mqttPublishMessage: '',
+  mqttPublishError: ''
 };
 
 function supportsLocalStorage() {
@@ -214,6 +232,20 @@ const elements = {
   modemResetButton: document.querySelector('[data-modem-reset]'),
   modemMessage: document.querySelector('[data-modem-message]'),
   modemError: document.querySelector('[data-modem-error]'),
+  mqttCard: document.querySelector('[data-mqtt-card]'),
+  mqttHostInput: document.querySelector('[data-mqtt-host]'),
+  mqttPortInput: document.querySelector('[data-mqtt-port]'),
+  mqttUserInput: document.querySelector('[data-mqtt-username]'),
+  mqttPasswordInput: document.querySelector('[data-mqtt-password]'),
+  mqttSaveButton: document.querySelector('[data-mqtt-save]'),
+  mqttResetButton: document.querySelector('[data-mqtt-reset]'),
+  mqttMessage: document.querySelector('[data-mqtt-message]'),
+  mqttError: document.querySelector('[data-mqtt-error]'),
+  mqttTopicInput: document.querySelector('[data-mqtt-topic]'),
+  mqttStreamSelect: document.querySelector('[data-mqtt-stream]'),
+  mqttSendButton: document.querySelector('[data-mqtt-send]'),
+  mqttPublishMessage: document.querySelector('[data-mqtt-publish-message]'),
+  mqttPublishError: document.querySelector('[data-mqtt-publish-error]'),
   doorHistoryBody: document.querySelector('[data-door-history-body]'),
   downloadHistoryButton: document.querySelector('[data-download-history]'),
   dashboardPanel: document.querySelector('[data-dashboard-panel]'),
@@ -579,6 +611,7 @@ function render() {
 
   renderPowerSavingCard();
   renderModemSleep();
+  renderMqtt();
   renderWifiScanResults();
   renderDoorHistory();
   renderTimezonePicker();
@@ -743,6 +776,228 @@ function renderModemSleep() {
     }
   }
 }
+
+function renderMqtt() {
+  if (!elements.mqttCard) {
+    return;
+  }
+  const settingsActive = state.activeTab === 'settings';
+  elements.mqttCard.hidden = !settingsActive;
+  const form = state.mqttForm ?? {};
+  const loading = state.mqttConfigLoading;
+  const saving = state.mqttSaving;
+  const locked = !settingsActive || loading || saving;
+  if (elements.mqttHostInput) {
+    elements.mqttHostInput.value = form.host ?? '';
+    elements.mqttHostInput.disabled = locked;
+  }
+  if (elements.mqttPortInput) {
+    elements.mqttPortInput.value = form.port ?? '';
+    elements.mqttPortInput.disabled = locked;
+  }
+  if (elements.mqttUserInput) {
+    elements.mqttUserInput.value = form.username ?? '';
+    elements.mqttUserInput.disabled = locked;
+  }
+  if (elements.mqttPasswordInput) {
+    elements.mqttPasswordInput.value = form.password ?? '';
+    elements.mqttPasswordInput.disabled = locked;
+  }
+  if (elements.mqttSaveButton) {
+    const hasHost = Boolean((form.host ?? '').trim());
+    elements.mqttSaveButton.disabled = locked || !hasHost;
+    elements.mqttSaveButton.textContent = saving ? 'Saving...' : 'Save MQTT';
+  }
+  if (elements.mqttResetButton) {
+    elements.mqttResetButton.disabled = saving;
+  }
+  if (elements.mqttMessage) {
+    const showMessage = Boolean(state.mqttMessage);
+    elements.mqttMessage.hidden = !showMessage;
+    if (showMessage) {
+      elements.mqttMessage.textContent = state.mqttMessage;
+    }
+  }
+  if (elements.mqttError) {
+    const showError = Boolean(state.mqttError);
+    elements.mqttError.hidden = !showError;
+    if (showError) {
+      elements.mqttError.textContent = state.mqttError;
+    }
+  }
+  const publishLocked = saving || loading;
+  if (elements.mqttTopicInput) {
+    elements.mqttTopicInput.value = state.mqttPublishForm?.topic ?? '';
+    elements.mqttTopicInput.disabled = publishLocked;
+  }
+  if (elements.mqttStreamSelect) {
+    elements.mqttStreamSelect.value = state.mqttPublishForm?.stream ?? 'batteryVoltage';
+    elements.mqttStreamSelect.disabled = publishLocked;
+  }
+  if (elements.mqttSendButton) {
+    const hasTopic = Boolean((state.mqttPublishForm?.topic ?? '').trim());
+    elements.mqttSendButton.disabled = publishLocked || !hasTopic;
+  }
+  if (elements.mqttPublishMessage) {
+    const show = Boolean(state.mqttPublishMessage);
+    elements.mqttPublishMessage.hidden = !show;
+    if (show) {
+      elements.mqttPublishMessage.textContent = state.mqttPublishMessage;
+    }
+  }
+  if (elements.mqttPublishError) {
+    const show = Boolean(state.mqttPublishError);
+    elements.mqttPublishError.hidden = !show;
+    if (show) {
+      elements.mqttPublishError.textContent = state.mqttPublishError;
+    }
+  }
+}
+
+function updateMqttFormField(field, value) {
+  setState({
+    mqttForm: { ...state.mqttForm, [field]: value },
+    mqttFormDirty: true,
+    mqttMessage: '',
+    mqttError: ''
+  });
+}
+
+function resetMqttForm(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  const cfg = state.mqttConfig ?? { host: '', port: '1883', username: '', password: '' };
+  setState({
+    mqttForm: {
+      host: cfg.host ?? '',
+      port: String(cfg.port ?? '1883'),
+      username: cfg.username ?? '',
+      password: ''
+    },
+    mqttFormDirty: false,
+    mqttMessage: '',
+    mqttError: ''
+  });
+}
+
+function applyMqttConfig(payload, options = {}) {
+  const host = payload?.host ?? '';
+  const port = payload?.port != null ? String(payload.port) : '1883';
+  const username = payload?.username ?? '';
+  const shouldSyncForm = options.force || !state.mqttFormDirty;
+  const nextForm = shouldSyncForm
+    ? { host, port, username, password: '' }
+    : { ...state.mqttForm };
+  setState({
+    mqttConfig: payload ?? state.mqttConfig,
+    mqttForm: nextForm,
+    mqttFormDirty: shouldSyncForm ? false : state.mqttFormDirty,
+    mqttConfigLoading: false,
+    mqttSaving: false,
+    mqttMessage: options.message ?? state.mqttMessage,
+    mqttError: options.error ?? ''
+  });
+}
+
+async function fetchMqttConfig(force = false) {
+  if (state.mqttConfigLoading && !force) {
+    return;
+  }
+  setState({ mqttConfigLoading: true, mqttError: '', mqttMessage: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/mqtt'), { cache: 'no-cache' });
+    if (!response.ok) {
+      throw new Error(`MQTT status failed with HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    applyMqttConfig(payload, { force: true });
+  } catch (error) {
+    console.error(error);
+    setState({ mqttConfigLoading: false, mqttError: error?.message ?? 'Unable to load MQTT settings.' });
+  }
+}
+
+async function handleMqttSave(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (state.mqttSaving) {
+    return;
+  }
+  const form = state.mqttForm ?? {};
+  const host = (form.host ?? '').trim();
+  const port = parseInt(form.port, 10);
+  if (!host) {
+    setState({ mqttError: 'Broker host is required.' });
+    return;
+  }
+  if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+    setState({ mqttError: 'Port must be between 1 and 65535.' });
+    return;
+  }
+  setState({ mqttSaving: true, mqttMessage: '', mqttError: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/mqtt'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-cache',
+      body: JSON.stringify({
+        host,
+        port,
+        username: form.username ?? '',
+        password: form.password ?? ''
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error ?? `MQTT save failed with HTTP ${response.status}`);
+    }
+    applyMqttConfig(payload, { force: true, message: 'MQTT settings saved.' });
+  } catch (error) {
+    console.error(error);
+    setState({ mqttSaving: false, mqttMessage: '', mqttError: error?.message ?? 'Unable to save MQTT settings.' });
+  }
+}
+
+function updateMqttPublishField(field, value) {
+  setState({
+    mqttPublishForm: { ...state.mqttPublishForm, [field]: value },
+    mqttPublishMessage: '',
+    mqttPublishError: ''
+  });
+}
+
+async function handleMqttPublish(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  const form = state.mqttPublishForm ?? {};
+  const topic = (form.topic ?? '').trim();
+  const stream = form.stream ?? 'batteryVoltage';
+  if (!topic) {
+    setState({ mqttPublishError: 'Topic is required.' });
+    return;
+  }
+  setState({ mqttPublishError: '', mqttPublishMessage: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/mqtt/publish'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-cache',
+      body: JSON.stringify({ topic, stream })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error ?? `Publish failed with HTTP ${response.status}`);
+    }
+    setState({ mqttPublishMessage: 'Published.', mqttPublishError: '' });
+  } catch (error) {
+    console.error(error);
+    setState({ mqttPublishMessage: '', mqttPublishError: error?.message ?? 'Unable to publish to MQTT.' });
+  }
+}
+
 
 function renderDoorHistory() {
   if (!elements.doorHistoryBody) {
@@ -1489,6 +1744,9 @@ function activateTab(tabName) {
   if (tabName === 'settings' && !state.schedulerStatus && !state.schedulerLoading) {
     fetchSchedulerConfig();
   }
+  if (tabName === 'settings' && !state.mqttConfig && !state.mqttConfigLoading) {
+    fetchMqttConfig();
+  }
 }
 
 async function fetchWifiConfig() {
@@ -1645,6 +1903,7 @@ function applyStatus(payload) {
   const normalizedPower = incomingPower ?? normalizePowerSavingStatus(state.powerSaving);
   const incomingModem = normalizeModemSleepStatus(payload?.modemSleep);
   const normalizedModem = incomingModem ?? normalizeModemSleepStatus(state.modemSleep);
+  const normalizedMqtt = payload?.mqtt ?? state.mqttConfig;
   const mergedStatus = { ...payload };
   if (normalizedPower) {
     mergedStatus.powerSaving = normalizedPower;
@@ -1675,6 +1934,15 @@ function applyStatus(payload) {
   const nextModemForm = shouldSyncModemForm
     ? { enabled: normalizedModem?.enabled ?? false }
     : state.modemSleepForm ?? { enabled: normalizedModem?.enabled ?? false };
+  const shouldSyncMqttForm = normalizedMqtt && !state.mqttFormDirty;
+  const nextMqttForm = shouldSyncMqttForm
+    ? {
+        host: normalizedMqtt?.host ?? '',
+        port: normalizedMqtt?.port != null ? String(normalizedMqtt.port) : '1883',
+        username: normalizedMqtt?.username ?? '',
+        password: ''
+      }
+    : state.mqttForm ?? { host: '', port: '1883', username: '', password: '' };
   setState({
     status: mergedStatus,
     powerSaving: normalizedPower ?? state.powerSaving,
@@ -1683,6 +1951,9 @@ function applyStatus(payload) {
     modemSleep: normalizedModem ?? state.modemSleep,
     modemSleepForm: nextModemForm,
     modemSleepDirty: shouldSyncModemForm ? false : state.modemSleepDirty,
+    mqttConfig: normalizedMqtt ?? state.mqttConfig,
+    mqttForm: nextMqttForm,
+    mqttFormDirty: shouldSyncMqttForm ? false : state.mqttFormDirty,
     schedulerStatus: payload?.scheduler ?? state.schedulerStatus,
     lastUpdated: new Date(),
     initialized: true
@@ -1932,6 +2203,33 @@ if (elements.modemToggle) {
 }
 if (elements.modemResetButton) {
   elements.modemResetButton.addEventListener('click', resetModemForm);
+}
+if (elements.mqttSaveButton) {
+  elements.mqttSaveButton.addEventListener('click', handleMqttSave);
+}
+if (elements.mqttResetButton) {
+  elements.mqttResetButton.addEventListener('click', resetMqttForm);
+}
+if (elements.mqttHostInput) {
+  elements.mqttHostInput.addEventListener('input', (event) => updateMqttFormField('host', event.target.value));
+}
+if (elements.mqttPortInput) {
+  elements.mqttPortInput.addEventListener('input', (event) => updateMqttFormField('port', event.target.value));
+}
+if (elements.mqttUserInput) {
+  elements.mqttUserInput.addEventListener('input', (event) => updateMqttFormField('username', event.target.value));
+}
+if (elements.mqttPasswordInput) {
+  elements.mqttPasswordInput.addEventListener('input', (event) => updateMqttFormField('password', event.target.value));
+}
+if (elements.mqttTopicInput) {
+  elements.mqttTopicInput.addEventListener('input', (event) => updateMqttPublishField('topic', event.target.value));
+}
+if (elements.mqttStreamSelect) {
+  elements.mqttStreamSelect.addEventListener('change', (event) => updateMqttPublishField('stream', event.target.value));
+}
+if (elements.mqttSendButton) {
+  elements.mqttSendButton.addEventListener('click', handleMqttPublish);
 }
 if (elements.timezoneTrigger) {
   elements.timezoneTrigger.addEventListener('click', () => {

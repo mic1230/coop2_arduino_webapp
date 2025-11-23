@@ -5,6 +5,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ArduinoJson.h>
+#include <mqtt_client.h>
 #include <esp_wifi.h>
 #include <esp32-hal-adc.h>
 #include <esp_sleep.h>
@@ -228,6 +229,22 @@ constexpr char PREF_KEY_POWER_SAVING_SLEEP[] = "ps_sleep_s";
 constexpr bool MODEM_SLEEP_DEFAULT_ENABLED = false;
 constexpr char PREF_KEY_MODEM_SLEEP_ENABLED[] = "modem_sleep";
 
+//==============================================================================
+// MQTT configuration
+//==============================================================================
+constexpr char PREF_KEY_MQTT_HOST[] = "mqtt_host";
+constexpr char PREF_KEY_MQTT_PORT[] = "mqtt_port";
+constexpr char PREF_KEY_MQTT_USER[] = "mqtt_user";
+constexpr char PREF_KEY_MQTT_PASS[] = "mqtt_pass";
+constexpr uint16_t MQTT_DEFAULT_PORT = 1883;
+
+struct MqttConfig {
+  String host;
+  uint16_t port = MQTT_DEFAULT_PORT;
+  String username;
+  String password;
+};
+
 struct PowerSavingConfig {
   bool enabled = POWER_SAVING_DEFAULT_ENABLED;
   uint32_t sleepSeconds = POWER_SAVING_DEFAULT_SLEEP_SECONDS;
@@ -288,6 +305,15 @@ void applyModemSleepSetting();
 String modemSleepStatusToJson();
 void handleModemSleepStatus();
 void handleModemSleepUpdate();
+MqttConfig sanitizeMqttConfig(const MqttConfig &config);
+void loadMqttConfig();
+bool persistMqttConfig(const MqttConfig &config);
+String mqttConfigToJson();
+bool mqttConfigured();
+bool publishMqttReading(const String &topic, const String &payload);
+void handleMqttStatus();
+void handleMqttUpdate();
+void handleMqttPublish();
 bool waitForSerial(uint32_t timeoutMs = SERIAL_WAIT_TIMEOUT_MS);
 void updateSerialAttachmentAnnounce();
 bool loadSolarScheduleConfig();
@@ -309,6 +335,15 @@ void beginManualOverride();
 bool manualOverrideActive(time_t nowUtc = 0);
 void updateManualOverride(time_t nowUtc = 0);
 String escapeJson(const String &value);
+MqttConfig sanitizeMqttConfig(const MqttConfig &config);
+void loadMqttConfig();
+bool persistMqttConfig(const MqttConfig &config);
+String mqttConfigToJson();
+bool mqttConfigured();
+bool publishMqttReading(const String &topic, const String &payload);
+void handleMqttStatus();
+void handleMqttUpdate();
+void handleMqttPublish();
 
 WebServer apiServer(80);
 bool apiServerEnabled = false;
@@ -355,6 +390,7 @@ PowerSavingConfig powerSavingConfig;
 uint32_t bootTimestampMs = 0;
 uint32_t lastClientActivityMs = 0;
 bool modemSleepEnabled = MODEM_SLEEP_DEFAULT_ENABLED;
+MqttConfig mqttConfig;
 
 enum class DoorState : uint8_t { Closed, Opened };
 
@@ -1573,6 +1609,116 @@ void maybeRecordHourlyHistory() {
 }
 
 //==============================================================================
+// MQTT helpers
+//==============================================================================
+MqttConfig sanitizeMqttConfig(const MqttConfig &config) {
+  MqttConfig sanitized = config;
+  sanitized.host.trim();
+  if (sanitized.port == 0) {
+    sanitized.port = MQTT_DEFAULT_PORT;
+  }
+  return sanitized;
+}
+
+void loadMqttConfig() {
+  MqttConfig loaded;
+  if (initDoorPreferences()) {
+    loaded.host = doorPrefs.getString(PREF_KEY_MQTT_HOST, "");
+    loaded.port = doorPrefs.getUShort(PREF_KEY_MQTT_PORT, MQTT_DEFAULT_PORT);
+    loaded.username = doorPrefs.getString(PREF_KEY_MQTT_USER, "");
+    loaded.password = doorPrefs.getString(PREF_KEY_MQTT_PASS, "");
+  }
+  mqttConfig = sanitizeMqttConfig(loaded);
+}
+
+bool persistMqttConfig(const MqttConfig &config) {
+  mqttConfig = sanitizeMqttConfig(config);
+  if (!initDoorPreferences()) {
+    Serial.println("Unable to persist MQTT config (prefs unavailable).");
+    return false;
+  }
+  doorPrefs.putString(PREF_KEY_MQTT_HOST, mqttConfig.host);
+  doorPrefs.putUShort(PREF_KEY_MQTT_PORT, mqttConfig.port);
+  doorPrefs.putString(PREF_KEY_MQTT_USER, mqttConfig.username);
+  doorPrefs.putString(PREF_KEY_MQTT_PASS, mqttConfig.password);
+  return true;
+}
+
+String mqttConfigToJson() {
+  String json;
+  json.reserve(256);
+  json += F("{\"host\":\"");
+  json += escapeJson(mqttConfig.host);
+  json += F("\",\"port\":");
+  json += mqttConfig.port;
+  json += F(",\"username\":\"");
+  json += escapeJson(mqttConfig.username);
+  json += F("\",\"hasPassword\":");
+  json += mqttConfig.password.isEmpty() ? F("false") : F("true");
+  json += F("}");
+  return json;
+}
+
+bool mqttConfigured() {
+  return mqttConfig.host.length() > 0 && mqttConfig.port > 0;
+}
+
+bool publishMqttReading(const String &topic, const String &payload) {
+  if (!mqttConfigured() || WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+  String uri = F("mqtt://");
+  uri += mqttConfig.host;
+  esp_mqtt_client_config_t config = {};
+  config.broker.address.uri = uri.c_str();
+  config.broker.address.port = mqttConfig.port;
+  if (mqttConfig.username.length() > 0) {
+    config.credentials.username = mqttConfig.username.c_str();
+  }
+  if (mqttConfig.password.length() > 0) {
+    config.credentials.authentication.password = mqttConfig.password.c_str();
+  }
+  esp_mqtt_client_handle_t client = esp_mqtt_client_init(&config);
+  if (client == nullptr) {
+    return false;
+  }
+  if (esp_mqtt_client_start(client) != ESP_OK) {
+    esp_mqtt_client_destroy(client);
+    return false;
+  }
+  const int msgId = esp_mqtt_client_publish(client, topic.c_str(), payload.c_str(),
+                                            payload.length(), 0, 0);
+  esp_mqtt_client_stop(client);
+  esp_mqtt_client_destroy(client);
+  return msgId >= 0;
+}
+
+String mqttPublishPayload(const String &stream, const SensorReadings &readings, time_t ts) {
+  String json;
+  json.reserve(160);
+  json += F("{\"stream\":\"");
+  json += stream;
+  json += F("\",\"timestamp\":");
+  json += String(static_cast<unsigned long>(ts));
+  json += F(",\"value\":");
+  if (stream == "greenhouseTempC") {
+    json += readings.hasGreenhouseTemp ? String(readings.greenhouseTempC, 2) : F("null");
+  } else if (stream == "greenhouseHumidityPct") {
+    json += readings.hasGreenhouseHumidity ? String(readings.greenhouseHumidityPct, 2) : F("null");
+  } else if (stream == "batteryVoltage") {
+    json += readings.hasBatteryVoltage ? String(readings.batteryVoltage, 2) : F("null");
+  } else if (stream == "doorState") {
+    json += '"';
+    json += doorStateToString(getDoorPosition());
+    json += '"';
+  } else {
+    json += F("null");
+  }
+  json += F("}");
+  return json;
+}
+
+//==============================================================================
 // Power saving (deep sleep) helpers
 //==============================================================================
 PowerSavingConfig sanitizePowerSavingConfig(const PowerSavingConfig &config) {
@@ -2042,7 +2188,7 @@ void handleApiRoot() {
   String json =
       F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
         "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/api/schedule\","
-        "\"/api/power\",\"/api/modem\",\"/history.csv\"]}");
+        "\"/api/power\",\"/api/modem\",\"/api/mqtt\",\"/api/mqtt/publish\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -2151,6 +2297,8 @@ void handleStatusEndpoint() {
   json += wifiStatusToJson();
   json += F(",\"modemSleep\":");
   json += modemSleepStatusToJson();
+  json += F(",\"mqtt\":");
+  json += mqttConfigToJson();
   json += F(",\"powerSaving\":");
   json += powerSavingStatusToJson();
   json += F(",\"scheduler\":");
@@ -2440,6 +2588,118 @@ void handleSolarScheduleUpdate() {
   sendJsonResponse(200, solarSchedulerStatusToJson(true));
 }
 
+void handleMqttStatus() {
+  sendJsonResponse(200, mqttConfigToJson());
+}
+
+void handleMqttUpdate() {
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  ArduinoJson::JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
+    return;
+  }
+  MqttConfig next = mqttConfig;
+  bool changed = false;
+  if (!doc["host"].isNull()) {
+    String host = String(doc["host"].as<const char *>());
+    host.trim();
+    if (host != next.host) {
+      next.host = host;
+      changed = true;
+    }
+  }
+  if (!doc["port"].isNull()) {
+    int portVal = doc["port"].as<int>();
+    if (portVal <= 0 || portVal > 65535) {
+      sendJsonResponse(400, F("{\"error\":\"invalid_port\"}"));
+      return;
+    }
+    uint16_t port = static_cast<uint16_t>(portVal);
+    if (port != next.port) {
+      next.port = port;
+      changed = true;
+    }
+  }
+  if (!doc["username"].isNull()) {
+    const String user = String(doc["username"].as<const char *>());
+    if (user != next.username) {
+      next.username = user;
+      changed = true;
+    }
+  }
+  if (!doc["password"].isNull()) {
+    const String pass = String(doc["password"].as<const char *>());
+    if (pass != next.password) {
+      next.password = pass;
+      changed = true;
+    }
+  }
+  next = sanitizeMqttConfig(next);
+  if (!changed) {
+    sendJsonResponse(200, mqttConfigToJson());
+    return;
+  }
+  if (!persistMqttConfig(next)) {
+    sendJsonResponse(500, F("{\"error\":\"save_failed\"}"));
+    return;
+  }
+  sendJsonResponse(200, mqttConfigToJson());
+}
+
+void handleMqttPublish() {
+  if (!mqttConfigured()) {
+    sendJsonResponse(400, F("{\"error\":\"not_configured\"}"));
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    sendJsonResponse(400, F("{\"error\":\"wifi_unavailable\"}"));
+    return;
+  }
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  ArduinoJson::JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
+    return;
+  }
+  const String topic = String(doc["topic"] | "");
+  const String stream = String(doc["stream"] | "");
+  if (topic.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"topic_required\"}"));
+    return;
+  }
+  if (stream.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"stream_required\"}"));
+    return;
+  }
+  SensorReadings readings = getSensorReadings();
+  const time_t ts = currentTimestamp();
+  const String payload = mqttPublishPayload(stream, readings, ts);
+  if (!publishMqttReading(topic, payload)) {
+    sendJsonResponse(500, F("{\"error\":\"publish_failed\"}"));
+    return;
+  }
+  sendJsonResponse(200, F("{\"status\":\"ok\"}"));
+}
+
 void handlePowerSavingStatus() {
   sendJsonResponse(200, powerSavingStatusToJson());
 }
@@ -2688,6 +2948,11 @@ void startApiServer() {
   apiServer.on("/api/modem", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/modem", HTTP_GET, handleModemSleepStatus);
   apiServer.on("/api/modem", HTTP_POST, handleModemSleepUpdate);
+  apiServer.on("/api/mqtt", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/mqtt", HTTP_GET, handleMqttStatus);
+  apiServer.on("/api/mqtt", HTTP_POST, handleMqttUpdate);
+  apiServer.on("/api/mqtt/publish", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/mqtt/publish", HTTP_POST, handleMqttPublish);
   apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
@@ -2716,6 +2981,7 @@ void setup() {
   initDoorPreferences();
   loadPowerSavingConfig();
   loadModemSleepPreference();
+  loadMqttConfig();
   initDoorHardware(true);
   loadSolarScheduleConfig();
   loadSolarScheduleExecutionState();

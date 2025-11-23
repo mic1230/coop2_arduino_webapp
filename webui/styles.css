@@ -328,6 +328,19 @@ button:disabled {
   margin-top: 0.5rem;
 }
 
+.mqtt-card .settings-actions {
+  justify-content: flex-start;
+}
+
+.mqtt-publish {
+  margin-top: 1rem;
+  border-top: 1px solid var(--coop-border);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
 .power-actions {
   display: flex;
   gap: 0.6rem;

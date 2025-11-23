@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Coop Door</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
-    <link rel="stylesheet" href="./styles.css?v=20251123.2" />
+    <link rel="stylesheet" href="./styles.css?v=20251123.3" />
   </head>
   <body>
     <main class="page container">
@@ -424,8 +424,62 @@
             <div class="banner error" data-modem-error hidden></div>
           </div>
         </article>
+
+        <article class="card mqtt-card" data-mqtt-card>
+          <div class="card-header">
+            <div>
+              <h2>MQTT settings</h2>
+              <p class="subtle">Send sensor data to your MQTT broker.</p>
+            </div>
+          </div>
+          <div class="banner info" data-mqtt-message hidden></div>
+          <div class="banner error" data-mqtt-error hidden></div>
+          <form class="settings-form" data-mqtt-form>
+            <label>
+              Broker host
+              <input type="text" autocomplete="off" placeholder="192.168.1.50" data-mqtt-host />
+            </label>
+            <label>
+              Port
+              <input type="number" inputmode="numeric" min="1" max="65535" data-mqtt-port />
+            </label>
+            <label>
+              Username (optional)
+              <input type="text" autocomplete="off" data-mqtt-username />
+            </label>
+            <label>
+              Password (optional)
+              <input type="password" autocomplete="off" data-mqtt-password />
+            </label>
+            <div class="settings-actions">
+              <button type="submit" class="action-button" data-mqtt-save>Save MQTT</button>
+              <button type="button" class="ghost small" data-mqtt-reset>Reset</button>
+            </div>
+          </form>
+          <div class="mqtt-publish">
+            <h3>Send a reading</h3>
+            <label>
+              Topic
+              <input type="text" autocomplete="off" placeholder="sensors/coop" data-mqtt-topic />
+            </label>
+            <label>
+              Data stream
+              <select data-mqtt-stream>
+                <option value="batteryVoltage">Battery voltage</option>
+                <option value="greenhouseTempC">Greenhouse temperature</option>
+                <option value="greenhouseHumidityPct">Greenhouse humidity</option>
+                <option value="doorState">Door state</option>
+              </select>
+            </label>
+            <div class="settings-actions">
+              <button type="button" class="action-button" data-mqtt-send>Send to MQTT</button>
+            </div>
+            <div class="banner info" data-mqtt-publish-message hidden></div>
+            <div class="banner error" data-mqtt-publish-error hidden></div>
+          </div>
+        </article>
       </section>
     </main>
-    <script src="./app.js?v=20251123.2" type="module"></script>
+    <script src="./app.js?v=20251123.3" type="module"></script>
   </body>
 </html>
