@@ -214,10 +214,9 @@
           <section class="card firmware-card" data-firmware-card>
             <div class="card-header">
               <div>
-                <h2>Firmware &amp; OTA</h2>
-                <p class="subtle">Review the current build and upload updates over Wi-Fi.</p>
+                <h2>Firmware</h2>
+                <p class="subtle">Review the current build.</p>
               </div>
-              <span class="chip info" data-ota-status-chip>Idle</span>
             </div>
             <dl class="key-values firmware-values">
               <div>
@@ -237,30 +236,6 @@
                 <dd data-firmware-space>--</dd>
               </div>
             </dl>
-            <p class="subtle small firmware-meta">
-              Partition <strong data-firmware-partition>--</strong> &middot; Next
-              <strong data-firmware-next>--</strong> &middot; MD5
-              <code data-firmware-hash>--</code>
-            </p>
-            <form class="ota-form" data-ota-form>
-              <label class="file-input">
-                <span>Firmware bundle (.bin)</span>
-                <input type="file" accept=".bin,application/octet-stream" data-ota-file />
-              </label>
-              <p class="subtle small" data-ota-file-meta>No firmware selected.</p>
-              <div class="ota-progress" data-ota-progress hidden>
-                <div class="fill" data-ota-progress-fill></div>
-                <span data-ota-progress-label>0%</span>
-              </div>
-              <div class="banner info" data-ota-message hidden></div>
-              <div class="settings-actions">
-                <button type="submit" class="action-button" data-ota-upload>Upload firmware</button>
-                <button type="button" class="ghost small" data-ota-clear>Clear</button>
-              </div>
-              <p class="subtle small">
-                Upload the compiled <code>.bin</code> from PlatformIO. Keep this page open until the controller reboots.
-              </p>
-            </form>
           </section>
         <section class="card scheduler-card" data-scheduler-card hidden>
           <div class="card-header">

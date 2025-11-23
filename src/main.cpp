@@ -5,9 +5,6 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ArduinoJson.h>
-#include <Update.h>
-#include <esp_app_format.h>
-#include <esp_ota_ops.h>
 #include <esp_wifi.h>
 #include <esp32-hal-adc.h>
 #include <esp_sleep.h>
@@ -312,11 +309,6 @@ void beginManualOverride();
 bool manualOverrideActive(time_t nowUtc = 0);
 void updateManualOverride(time_t nowUtc = 0);
 String escapeJson(const String &value);
-String firmwareMetadataToJson();
-String otaStatusToJson();
-void handleOtaStatus();
-void handleOtaUploadRequest();
-void handleOtaUploadStream();
 
 WebServer apiServer(80);
 bool apiServerEnabled = false;
@@ -382,7 +374,6 @@ uint8_t configuredRelayClosePin = 0;
 bool temperatureSensorsInitialized = false;
 uint8_t configuredSensorSdaPin = INVALID_PIN;
 uint8_t configuredSensorSclPin = INVALID_PIN;
-bool otaSupported = true;
 
 struct DoorHistoryEntry {
   time_t timestamp = 0;
@@ -415,23 +406,6 @@ String activeTimezoneId = DEFAULT_TIMEZONE_ID;
 int activeTimezoneOffsetMinutes = 0;
 static bool serialConsoleAttached = false;
 static bool serialAnnouncementSent = false;
-
-enum class OtaResult : uint8_t { Idle, Success, Error };
-
-struct OtaUpdateState {
-  bool active = false;
-  bool rebootPending = false;
-  size_t receivedBytes = 0;
-  size_t totalBytes = 0;
-  uint32_t startedMs = 0;
-  uint32_t completedMs = 0;
-  OtaResult lastResult = OtaResult::Idle;
-  String lastError;
-  String lastFilename;
-};
-
-constexpr uint32_t OTA_REBOOT_GRACE_MS = 10000;
-OtaUpdateState otaUpdateState;
 
 const char *doorStateToString(DoorState state) {
   return state == DoorState::Opened ? "opened" : "closed";
@@ -590,146 +564,9 @@ String chipDescriptor() {
 #ifdef ARDUINO_VARIANT
   oss << " / " << ARDUINO_VARIANT;
 #endif
-  const std::string text = oss.str();
+const std::string text = oss.str();
   return String(text.c_str());
 }
-
-const char *otaResultToString(OtaResult result) {
-  switch (result) {
-    case OtaResult::Success:
-      return "success";
-    case OtaResult::Error:
-      return "error";
-    default:
-      return "idle";
-  }
-}
-
-void resetOtaTrackingState() {
-  otaUpdateState.active = false;
-  otaUpdateState.rebootPending = false;
-  otaUpdateState.receivedBytes = 0;
-  otaUpdateState.totalBytes = 0;
-  otaUpdateState.startedMs = 0;
-  otaUpdateState.completedMs = 0;
-  otaUpdateState.lastResult = OtaResult::Idle;
-  otaUpdateState.lastError = "";
-  otaUpdateState.lastFilename = "";
-}
-
-void beginOtaTracking(const String &filename, size_t expectedBytes) {
-  otaUpdateState.active = true;
-  otaUpdateState.rebootPending = false;
-  otaUpdateState.receivedBytes = 0;
-  otaUpdateState.totalBytes = expectedBytes;
-  otaUpdateState.startedMs = millis();
-  otaUpdateState.completedMs = 0;
-  otaUpdateState.lastError = "";
-  otaUpdateState.lastFilename = filename;
-  otaUpdateState.lastResult = OtaResult::Idle;
-}
-
-void completeOtaSuccess(size_t totalBytes) {
-  otaUpdateState.active = false;
-  otaUpdateState.rebootPending = true;
-  const size_t finalSize = totalBytes > 0 ? totalBytes : otaUpdateState.receivedBytes;
-  otaUpdateState.totalBytes = finalSize;
-  otaUpdateState.receivedBytes = finalSize;
-  otaUpdateState.completedMs = millis();
-  otaUpdateState.lastResult = OtaResult::Success;
-  otaUpdateState.lastError = "";
-}
-
-void failOtaUpdate(const String &message) {
-  Update.abort();
-  otaUpdateState.active = false;
-  otaUpdateState.rebootPending = false;
-  otaUpdateState.completedMs = millis();
-  otaUpdateState.lastResult = OtaResult::Error;
-  otaUpdateState.lastError = message;
-}
-
-String firmwareMetadataToJson() {
-  const esp_app_desc_t *app = esp_app_get_description();
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
-  String json;
-  json.reserve(512);
-  json += F("{\"device\":\"");
-  json += escapeJson(chipDescriptor());
-  json += F("\",\"projectName\":\"");
-  json += app ? escapeJson(String(app->project_name)) : String("");
-  json += F("\",\"appVersion\":\"");
-  json += app ? escapeJson(String(app->version)) : String("");
-  json += F("\",\"idfVersion\":\"");
-  json += app ? escapeJson(String(app->idf_ver)) : String("");
-  json += F("\",\"buildDate\":\"");
-  json += escapeJson(String(BUILD_DATE));
-  json += F("\",\"buildTime\":\"");
-  json += escapeJson(String(BUILD_TIME));
-  json += F("\",\"buildTimestamp\":\"");
-  json += escapeJson(String(BUILD_TIMESTAMP));
-  json += F("\",\"sdkVersion\":\"");
-  json += escapeJson(String(ESP.getSdkVersion()));
-  json += F("\",\"sketchSize\":");
-  json += String(ESP.getSketchSize());
-  json += F(",\"sketchMD5\":\"");
-  json += escapeJson(ESP.getSketchMD5());
-  json += F("\",\"freeSpace\":");
-  json += String(ESP.getFreeSketchSpace());
-  json += F(",\"flashSize\":");
-  json += String(ESP.getFlashChipSize());
-  json += F(",\"flashSpeedHz\":");
-  json += String(ESP.getFlashChipSpeed());
-  json += F(",\"currentPartition\":\"");
-  json += running ? escapeJson(String(running->label)) : String("");
-  json += F("\",\"nextPartition\":\"");
-  json += next ? escapeJson(String(next->label)) : String("");
-  json += F("\",\"uptimeMs\":");
-  json += String(millis());
-  json += F("}");
-  return json;
-}
-
-String otaStatusToJson() {
-  String json;
-  json.reserve(360);
-  json += F("{\"inProgress\":");
-  json += otaUpdateState.active ? F("true") : F("false");
-  json += F(",\"supported\":");
-  json += otaSupported ? F("true") : F("false");
-  json += F(",\"receivedBytes\":");
-  json += String(otaUpdateState.receivedBytes);
-  json += F(",\"totalBytes\":");
-  if (otaUpdateState.totalBytes > 0) {
-    json += String(otaUpdateState.totalBytes);
-  } else {
-    json += F("null");
-  }
-  json += F(",\"result\":\"");
-  json += otaResultToString(otaUpdateState.lastResult);
-  json += F("\",\"error\":\"");
-  json += escapeJson(otaUpdateState.lastError);
-  json += F("\",\"rebootPending\":");
-  json += otaUpdateState.rebootPending ? F("true") : F("false");
-  json += F(",\"startedAtMs\":");
-  if (otaUpdateState.startedMs > 0) {
-    json += String(otaUpdateState.startedMs);
-  } else {
-    json += F("null");
-  }
-  json += F(",\"completedAtMs\":");
-  if (otaUpdateState.completedMs > 0) {
-    json += String(otaUpdateState.completedMs);
-  } else {
-    json += F("null");
-  }
-  json += F(",\"filename\":\"");
-  json += escapeJson(otaUpdateState.lastFilename);
-  json += F("\"}");
-  return json;
-}
-
 bool beginDoorMotion(DoorMotion motion) {
   if (doorMotion.motion != DoorMotion::Idle) {
     Serial.printf("Rejecting %s request - door already %s.\n", doorMotionToString(motion),
@@ -1773,14 +1610,12 @@ bool persistPowerSavingConfig(const PowerSavingConfig &config) {
 String powerSavingStatusToJson() {
   powerSavingConfig = sanitizePowerSavingConfig(powerSavingConfig);
   const bool doorBusy = doorMotion.motion != DoorMotion::Idle;
-  const bool otaBusy = otaUpdateState.active;
-  const bool otaPending = otaUpdateState.rebootPending;
   const bool portalActive = configPortalActive;
   const uint32_t nowMs = millis();
   const bool userActive =
       lastClientActivityMs > 0 && nowMs >= lastClientActivityMs &&
       nowMs - lastClientActivityMs < POWER_SAVING_USER_ACTIVITY_GRACE_MS;
-  const bool blocked = doorBusy || otaBusy || otaPending || portalActive || userActive;
+  const bool blocked = doorBusy || portalActive || userActive;
   const uint32_t awakeMs = nowMs - bootTimestampMs;
   const uint32_t uptimeSeconds = nowMs / 1000;
   const uint32_t minAwakeSeconds = POWER_SAVING_MIN_AWAKE_MS / 1000;
@@ -1831,12 +1666,6 @@ String powerSavingStatusToJson() {
   if (doorBusy) {
     appendBlocker("door_motion");
   }
-  if (otaBusy) {
-    appendBlocker("ota_active");
-  }
-  if (otaPending) {
-    appendBlocker("ota_reboot_pending");
-  }
   if (portalActive) {
     appendBlocker("config_portal");
   }
@@ -1853,9 +1682,6 @@ void updatePowerSaving() {
     return;
   }
   if (doorMotion.motion != DoorMotion::Idle) {
-    return;
-  }
-  if (otaUpdateState.active || otaUpdateState.rebootPending) {
     return;
   }
   if (configPortalActive) {
@@ -2216,8 +2042,7 @@ void handleApiRoot() {
   String json =
       F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
         "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/api/schedule\","
-        "\"/api/power\",\"/api/modem\","
-        "\"/api/ota\",\"/api/ota/upload\",\"/history.csv\"]}");
+        "\"/api/power\",\"/api/modem\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -2332,113 +2157,6 @@ void handleStatusEndpoint() {
   json += solarSchedulerStatusToJson(false);
   json += F("}");
   sendJsonResponse(200, json);
-}
-
-void handleOtaStatus() {
-  String json;
-  json.reserve(640);
-  json += F("{\"firmware\":");
-  json += firmwareMetadataToJson();
-  json += F(",\"ota\":");
-  json += otaStatusToJson();
-  json += F("}");
-  sendJsonResponse(200, json);
-}
-
-void handleOtaUploadRequest() {
-  if (!otaSupported) {
-    sendJsonResponse(400, F("{\"status\":\"unsupported\"}"));
-    return;
-  }
-  if (otaUpdateState.active) {
-    sendJsonResponse(202, F("{\"status\":\"in_progress\"}"));
-    return;
-  }
-  if (otaUpdateState.rebootPending) {
-    sendJsonResponse(200, F("{\"status\":\"ok\",\"rebooting\":true}"));
-    delay(750);
-    ESP.restart();
-    return;
-  }
-  if (otaUpdateState.lastResult == OtaResult::Error && otaUpdateState.lastError.length() > 0) {
-    String json;
-    json.reserve(160);
-    json += F("{\"status\":\"error\",\"error\":\"");
-    json += escapeJson(otaUpdateState.lastError);
-    json += F("\"}");
-    sendJsonResponse(500, json);
-    return;
-  }
-  sendJsonResponse(200, F("{\"status\":\"idle\"}"));
-}
-
-String buildUpdateErrorMessage(const __FlashStringHelper *prefix) {
-  String message;
-  message.reserve(96);
-  if (prefix != nullptr) {
-    message += prefix;
-  }
-  message += F(" (err ");
-  message += String(Update.getError());
-  message += F(")");
-  return message;
-}
-
-void handleOtaUploadStream() {
-  HTTPUpload &upload = apiServer.upload();
-  switch (upload.status) {
-    case UPLOAD_FILE_START: {
-      Serial.printf("OTA upload started: %s (expected %u bytes).\n", upload.filename.c_str(),
-                    static_cast<unsigned>(upload.totalSize));
-      beginOtaTracking(upload.filename, upload.totalSize);
-      const size_t expected = upload.totalSize > 0 ? upload.totalSize : UPDATE_SIZE_UNKNOWN;
-      if (!Update.begin(expected)) {
-        Serial.println(F("OTA begin failed."));
-        Update.printError(Serial);
-        failOtaUpdate(buildUpdateErrorMessage(F("Unable to prepare OTA")));
-      }
-      break;
-    }
-    case UPLOAD_FILE_WRITE: {
-      if (!otaUpdateState.active) {
-        return;
-      }
-      const size_t chunkSize = upload.currentSize;
-      const size_t written = Update.write(upload.buf, chunkSize);
-      if (written != chunkSize) {
-        Serial.println(F("OTA write failed."));
-        Update.printError(Serial);
-        failOtaUpdate(buildUpdateErrorMessage(F("Write failed")));
-        return;
-      }
-      otaUpdateState.receivedBytes += written;
-      if (upload.totalSize > 0) {
-        otaUpdateState.totalBytes = upload.totalSize;
-      }
-      break;
-    }
-    case UPLOAD_FILE_END: {
-      if (!otaUpdateState.active) {
-        return;
-      }
-      if (!Update.end(true)) {
-        Serial.println(F("OTA finalize failed."));
-        Update.printError(Serial);
-        failOtaUpdate(buildUpdateErrorMessage(F("Finalize failed")));
-        return;
-      }
-      Serial.println(F("OTA update complete; reboot pending."));
-      completeOtaSuccess(upload.totalSize);
-      break;
-    }
-    case UPLOAD_FILE_ABORTED: {
-      Serial.println(F("OTA upload aborted by client."));
-      failOtaUpdate(String(F("Upload aborted")));
-      break;
-    }
-    default:
-      break;
-  }
 }
 
 void handleNotFound() {
@@ -2970,10 +2688,6 @@ void startApiServer() {
   apiServer.on("/api/modem", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/modem", HTTP_GET, handleModemSleepStatus);
   apiServer.on("/api/modem", HTTP_POST, handleModemSleepUpdate);
-  apiServer.on("/api/ota", HTTP_OPTIONS, handleOptions);
-  apiServer.on("/api/ota", HTTP_GET, handleOtaStatus);
-  apiServer.on("/api/ota/upload", HTTP_OPTIONS, handleOptions);
-  apiServer.on("/api/ota/upload", HTTP_POST, handleOtaUploadRequest, handleOtaUploadStream);
   apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
@@ -2995,13 +2709,8 @@ void setup() {
   } else {
     updateSerialAttachmentAnnounce();
   }
-  resetOtaTrackingState();
   Serial.println("Booting coop door controller...");
   WiFi.onEvent(handleWifiEvent);
-  otaSupported = esp_ota_get_next_update_partition(nullptr) != nullptr;
-  if (!otaSupported) {
-    Serial.println("OTA updates not supported with current partition table (single app slot).");
-  }
 
   ensureFileSystem();
   initDoorPreferences();
@@ -3060,15 +2769,6 @@ void loop() {
     apiServer.handleClient();
   }
   serviceCaptiveDns();
-  if (otaUpdateState.rebootPending && !otaUpdateState.active && otaUpdateState.completedMs > 0) {
-    const uint32_t elapsed = millis() - otaUpdateState.completedMs;
-    if (elapsed >= OTA_REBOOT_GRACE_MS) {
-      Serial.println(F("OTA grace period elapsed; restarting now."));
-      otaUpdateState.rebootPending = false;
-      delay(100);
-      ESP.restart();
-    }
-  }
   updatePowerSaving();
   delay(10);
 }

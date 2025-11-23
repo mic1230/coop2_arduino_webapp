@@ -91,16 +91,7 @@ const state = {
   modemSleepMessage: '',
   modemSleepError: '',
   overrideMs: null,
-  firmwareInfo: null,
-  otaStatus: null,
-  otaStatusLoading: false,
-  otaUploading: false,
-  otaUploadProgressBytes: 0,
-  otaUploadProgressTotal: 0,
-  otaMessage: '',
-  otaMessageType: '',
-  otaSelectedFileName: '',
-  otaSelectedFileSize: 0
+  firmwareInfo: null
 };
 
 function supportsLocalStorage() {
@@ -267,25 +258,7 @@ const elements = {
   schedulerRefreshButton: document.querySelector('[data-scheduler-refresh]'),
   geoInput: document.querySelector('[data-geo-input]'),
   geoSuggest: document.querySelector('[data-geo-suggest]'),
-  geoCountry: document.querySelector('[data-geo-country]'),
-  firmwareCard: document.querySelector('[data-firmware-card]'),
-  firmwareDevice: document.querySelector('[data-firmware-device]'),
-  firmwareBuild: document.querySelector('[data-firmware-build]'),
-  firmwareSketch: document.querySelector('[data-firmware-sketch]'),
-  firmwareSpace: document.querySelector('[data-firmware-space]'),
-  firmwarePartition: document.querySelector('[data-firmware-partition]'),
-  firmwareNext: document.querySelector('[data-firmware-next]'),
-  firmwareHash: document.querySelector('[data-firmware-hash]'),
-  otaStatusChip: document.querySelector('[data-ota-status-chip]'),
-  otaForm: document.querySelector('[data-ota-form]'),
-  otaFileInput: document.querySelector('[data-ota-file]'),
-  otaFileMeta: document.querySelector('[data-ota-file-meta]'),
-  otaUploadButton: document.querySelector('[data-ota-upload]'),
-  otaClearButton: document.querySelector('[data-ota-clear]'),
-  otaProgressBar: document.querySelector('[data-ota-progress]'),
-  otaProgressFill: document.querySelector('[data-ota-progress-fill]'),
-  otaProgressLabel: document.querySelector('[data-ota-progress-label]'),
-  otaMessage: document.querySelector('[data-ota-message]')
+  geoCountry: document.querySelector('[data-geo-country]')
 };
 
 function setState(patch) {
@@ -556,95 +529,6 @@ function render() {
   }
   if (elements.wifiScanButton) {
     elements.wifiScanButton.disabled = !settingsActive || state.wifiScanLoading;
-  }
-
-  const firmwareInfo = state.firmwareInfo ?? state.status?.firmware ?? null;
-  const otaStatus = state.otaStatus ?? state.status?.ota ?? null;
-  if (elements.firmwareDevice) {
-    elements.firmwareDevice.textContent = firmwareInfo?.device ?? '--';
-  }
-  if (elements.firmwareBuild) {
-    elements.firmwareBuild.textContent = formatFirmwareBuild(firmwareInfo);
-  }
-  if (elements.firmwareSketch) {
-    elements.firmwareSketch.textContent = formatBytes(firmwareInfo?.sketchSize);
-  }
-  if (elements.firmwareSpace) {
-    elements.firmwareSpace.textContent = formatBytes(firmwareInfo?.freeSpace);
-  }
-  if (elements.firmwarePartition) {
-    elements.firmwarePartition.textContent = firmwareInfo?.currentPartition || '--';
-  }
-  if (elements.firmwareNext) {
-    elements.firmwareNext.textContent = firmwareInfo?.nextPartition || '--';
-  }
-  if (elements.firmwareHash) {
-    elements.firmwareHash.textContent = firmwareInfo?.sketchMD5 || '--';
-  }
-  const otaChip = deriveOtaStatusChip(otaStatus, state.otaUploading);
-  if (elements.otaStatusChip) {
-    elements.otaStatusChip.textContent = otaChip.label;
-    elements.otaStatusChip.className = `chip ${otaChip.tone}`;
-  }
-  if (elements.otaFileMeta) {
-    elements.otaFileMeta.textContent = state.otaSelectedFileName
-      ? `${state.otaSelectedFileName} (${formatBytes(state.otaSelectedFileSize)})`
-      : 'No firmware selected.';
-  }
-  if (elements.otaFileInput) {
-    elements.otaFileInput.disabled = !settingsActive || state.otaUploading;
-  }
-  if (elements.otaUploadButton) {
-    const hasFile = Boolean(state.otaSelectedFileName);
-    const locked = !settingsActive || state.otaUploading;
-    elements.otaUploadButton.disabled = locked || !hasFile;
-    elements.otaUploadButton.textContent = state.otaUploading ? 'Uploading...' : 'Upload firmware';
-  }
-  if (elements.otaClearButton) {
-    const hasFile = Boolean(state.otaSelectedFileName);
-    elements.otaClearButton.disabled = state.otaUploading || !hasFile;
-  }
-  if (elements.otaProgressBar) {
-    const total = state.otaUploadProgressTotal || 0;
-    const showProgress = state.otaUploading && total > 0;
-    elements.otaProgressBar.hidden = !showProgress;
-    if (showProgress) {
-      const loaded = Math.min(state.otaUploadProgressBytes, total);
-      const percent = Math.min(100, Math.round((loaded / total) * 100));
-      if (elements.otaProgressFill) {
-        elements.otaProgressFill.style.width = `${percent}%`;
-      }
-      if (elements.otaProgressLabel) {
-        elements.otaProgressLabel.textContent = `${percent}%`;
-      }
-    }
-  }
-  if (elements.otaMessage) {
-    let messageText = state.otaMessage;
-    let messageType = state.otaMessageType || 'info';
-    if (!messageText) {
-      if (state.otaUploading) {
-        messageText = 'Uploading firmware...';
-        messageType = 'info';
-      } else if (otaStatus?.rebootPending) {
-        messageText = 'Upload complete. Waiting for reboot...';
-        messageType = 'info';
-      } else if (otaStatus?.result === 'error' && otaStatus?.error) {
-        messageText = otaStatus.error;
-        messageType = 'error';
-      } else if (otaStatus?.result === 'success' && otaStatus?.filename) {
-        messageText = `Last update: ${otaStatus.filename}`;
-        messageType = 'success';
-      }
-    }
-    const showMessage = Boolean(messageText);
-    elements.otaMessage.hidden = !showMessage;
-    if (showMessage) {
-      elements.otaMessage.textContent = messageText;
-      elements.otaMessage.classList.remove('info', 'error', 'success');
-      elements.otaMessage.classList.add(messageType === 'error' ? 'error' :
-        messageType === 'success' ? 'success' : 'info');
-    }
   }
 
   const schedulerForm = state.schedulerForm ?? {};
@@ -1235,62 +1119,6 @@ function formatBytes(value) {
   return `${bytes.toFixed(decimals)} ${units[unitIndex]}`;
 }
 
-function formatFirmwareBuild(info) {
-  if (!info) {
-    return '--';
-  }
-  if (info.appVersion && info.projectName) {
-    return `${info.appVersion} (${info.projectName})`;
-  }
-  if (info.appVersion) {
-    return info.appVersion;
-  }
-  return info.buildTimestamp || info.buildDate || '--';
-}
-
-function deriveOtaStatusChip(status, uploading) {
-  if (uploading || status?.inProgress) {
-    return { label: 'Uploading', tone: 'warning' };
-  }
-  if (status?.rebootPending) {
-    return { label: 'Reboot pending', tone: 'warning' };
-  }
-  if (status?.result === 'success') {
-    return { label: 'Updated', tone: 'success' };
-  }
-  if (status?.result === 'error') {
-    return { label: 'Failed', tone: 'danger' };
-  }
-  return { label: 'Idle', tone: 'info' };
-}
-
-function formatTravelTimeInputValue(travelTimeMs) {
-  const numeric = Number(travelTimeMs);
-  if (!Number.isFinite(numeric) || numeric <= 0) {
-    return '';
-  }
-  const seconds = numeric / 1000;
-  const rounded = Math.round(seconds * 1000) / 1000;
-  let text = rounded.toString();
-  if (text.includes('.')) {
-    text = text.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
-  }
-  return text;
-}
-
-function formatTimezoneOffset(minutes) {
-  if (typeof minutes !== 'number' || Number.isNaN(minutes)) {
-    return 'UTC+00:00';
-  }
-  const sign = minutes >= 0 ? '+' : '-';
-  const absMinutes = Math.abs(minutes);
-  const hours = Math.floor(absMinutes / 60)
-    .toString()
-    .padStart(2, '0');
-  const remainder = (absMinutes % 60).toString().padStart(2, '0');
-  return `UTC${sign}${hours}:${remainder}`;
-}
-
 function formatSchedulerTime(value) {
   if (typeof value !== 'number' || value <= 0) {
     return '--';
@@ -1394,8 +1222,6 @@ function formatPowerBlockers(blockers) {
   }
   const labels = {
     door_motion: 'Door motion',
-    ota_active: 'OTA update',
-    ota_reboot_pending: 'Pending OTA reboot',
     config_portal: 'Wi-Fi setup portal',
     user_activity: 'Active web session'
   };
@@ -1643,320 +1469,6 @@ async function handleSchedulerSubmit(event) {
   }
 }
 
-function handleOtaFileChange(event) {
-  const file = event?.target?.files?.[0];
-  if (!file) {
-    setState({
-      otaSelectedFileName: '',
-      otaSelectedFileSize: 0,
-      otaUploadProgressBytes: 0,
-      otaUploadProgressTotal: 0
-    });
-    return;
-  }
-  setState({
-    otaSelectedFileName: file.name,
-    otaSelectedFileSize: file.size,
-    otaUploadProgressBytes: 0,
-    otaUploadProgressTotal: 0,
-    otaMessage: '',
-    otaMessageType: ''
-  });
-}
-
-function clearOtaSelection(event) {
-  if (event) {
-    event.preventDefault();
-  }
-  if (elements.otaFileInput) {
-    elements.otaFileInput.value = '';
-  }
-  setState({
-    otaSelectedFileName: '',
-    otaSelectedFileSize: 0,
-    otaUploadProgressBytes: 0,
-    otaUploadProgressTotal: 0
-  });
-}
-
-async function handleOtaUpload(event) {
-  if (event) {
-    event.preventDefault();
-  }
-  if (state.otaUploading) {
-    return;
-  }
-  const file = elements.otaFileInput?.files?.[0];
-  if (!file) {
-    setState({
-      otaMessage: 'Select a firmware bundle first.',
-      otaMessageType: 'error'
-    });
-    return;
-  }
-  setState({
-    otaUploading: true,
-    otaMessage: '',
-    otaMessageType: '',
-    otaUploadProgressBytes: 0,
-    otaUploadProgressTotal: file.size
-  });
-  try {
-    await uploadFirmware(file);
-    setState({
-      otaUploading: false,
-      otaMessage: 'Upload complete. Waiting for controller to reboot...',
-      otaMessageType: 'info',
-      otaSelectedFileName: '',
-      otaSelectedFileSize: 0,
-      otaUploadProgressBytes: file.size,
-      otaUploadProgressTotal: file.size
-    });
-    if (elements.otaFileInput) {
-      elements.otaFileInput.value = '';
-    }
-    fetchFirmwareStatus(true);
-  } catch (error) {
-    console.error(error);
-    setState({
-      otaUploading: false,
-      otaMessage: error?.message ?? 'Unable to upload firmware.',
-      otaMessageType: 'error'
-    });
-  }
-}
-
-function uploadFirmware(file) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    let reportedComplete = false;
-    xhr.open('POST', buildEndpoint('/api/ota/upload'), true);
-    const formData = new FormData();
-    formData.append('firmware', file, file.name);
-    xhr.upload.onprogress = (event) => {
-      const total = event.lengthComputable ? event.total : file.size;
-      const loaded = event.lengthComputable ? event.loaded : Math.min(file.size, event.loaded ?? 0);
-      if (loaded >= total) {
-        reportedComplete = true;
-      }
-      setState({
-        otaUploadProgressBytes: loaded,
-        otaUploadProgressTotal: total
-      });
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
-        return;
-      }
-      if (xhr.status === 0 && reportedComplete) {
-        resolve();
-        return;
-      }
-      let message = 'Upload failed.';
-      try {
-        const payload = JSON.parse(xhr.responseText || '{}');
-        if (payload?.error) {
-          message = payload.error;
-        }
-      } catch (parseError) {
-        // ignore parse errors, use fallback message
-      }
-      reject(new Error(message));
-    };
-    xhr.onerror = () => {
-      if (reportedComplete) {
-        resolve();
-        return;
-      }
-      reject(new Error('Upload failed. Check your connection.'));
-    };
-    xhr.onabort = () => reject(new Error('Upload canceled.'));
-    xhr.send(formData);
-  });
-}
-
-
-function downloadHistoryCsv() {
-  const timestamp = new Date().toISOString().replace(/[:]/g, '-').split('.')[0];
-  const link = document.createElement('a');
-  link.href = buildEndpoint('/history.csv');
-  link.download = `door-history-${timestamp}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-function updatePowerFormField(field, value) {
-  setState({
-    powerSavingForm: {
-      ...state.powerSavingForm,
-      [field]: value
-    },
-    powerSavingDirty: true,
-    powerSavingMessage: '',
-    powerSavingError: ''
-  });
-}
-
-function resetPowerForm(event) {
-  if (event) {
-    event.preventDefault();
-  }
-  const current = normalizePowerSavingStatus(powerSavingStatus()) ?? {
-    enabled: false,
-    sleepSeconds: POWER_SAVE_DEFAULT_SLEEP_SECONDS
-  };
-  setState({
-    powerSavingForm: {
-      enabled: current.enabled ?? false,
-      sleepSeconds: String(current.sleepSeconds ?? POWER_SAVE_DEFAULT_SLEEP_SECONDS)
-    },
-    powerSavingDirty: false,
-    powerSavingMessage: '',
-    powerSavingError: ''
-  });
-}
-
-async function handlePowerFormSubmit(event) {
-  if (event) {
-    event.preventDefault();
-  }
-  if (state.powerSavingSaving) {
-    return;
-  }
-  const status = normalizePowerSavingStatus(powerSavingStatus());
-  const form = state.powerSavingForm ?? {};
-  const minSleep = status?.minSleepSeconds ?? POWER_SAVE_MIN_SECONDS;
-  const maxSleep = status?.maxSleepSeconds ?? POWER_SAVE_MAX_SECONDS;
-  const enabled =
-    form.enabled === undefined || form.enabled === null
-      ? Boolean(status?.enabled)
-      : form.enabled === true || form.enabled === 'true' || form.enabled === 1 || form.enabled === '1';
-  const sleepSeconds = parseInt(form.sleepSeconds, 10);
-  if (!Number.isFinite(sleepSeconds)) {
-    setState({
-      powerSavingError: `Enter a deep sleep duration between ${minSleep} and ${maxSleep} seconds.`
-    });
-    return;
-  }
-  if (sleepSeconds < minSleep || sleepSeconds > maxSleep) {
-    setState({
-      powerSavingError: `Deep sleep must be between ${minSleep} and ${maxSleep} seconds.`
-    });
-    return;
-  }
-  setState({ powerSavingSaving: true, powerSavingMessage: '', powerSavingError: '' });
-  try {
-    const response = await fetch(buildEndpoint('/api/power'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-cache',
-      body: JSON.stringify({ enabled, sleepSeconds })
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(body?.error ?? `Power saving update failed with HTTP ${response.status}`);
-    }
-    const normalized = normalizePowerSavingStatus(body) ?? { enabled, sleepSeconds };
-    const sleepValue =
-      normalized?.sleepSeconds != null
-        ? String(normalized.sleepSeconds)
-        : String(sleepSeconds);
-    const statusPatch = state.status
-      ? { ...state.status, powerSaving: normalized }
-      : { powerSaving: normalized };
-    setState({
-      powerSaving: normalized,
-      status: statusPatch,
-      powerSavingForm: {
-        enabled: normalized?.enabled ?? enabled,
-        sleepSeconds: sleepValue
-      },
-      powerSavingDirty: false,
-      powerSavingSaving: false,
-      powerSavingMessage: 'Power saving updated.',
-      powerSavingError: ''
-    });
-  } catch (error) {
-    console.error(error);
-    setState({
-      powerSavingSaving: false,
-      powerSavingMessage: '',
-      powerSavingError: error?.message ?? 'Unable to update power saving.'
-    });
-  }
-}
-
-function updateModemFormField(value) {
-  setState({
-    modemSleepForm: { enabled: value },
-    modemSleepDirty: true,
-    modemSleepMessage: '',
-    modemSleepError: ''
-  });
-}
-
-function resetModemForm(event) {
-  if (event) {
-    event.preventDefault();
-  }
-  const status = normalizeModemSleepStatus(modemSleepStatus()) ?? { enabled: false };
-  setState({
-    modemSleepForm: { enabled: status.enabled ?? false },
-    modemSleepDirty: false,
-    modemSleepMessage: '',
-    modemSleepError: ''
-  });
-}
-
-async function handleModemFormSubmit(event) {
-  if (event) {
-    event.preventDefault();
-  }
-  if (state.modemSleepSaving) {
-    return;
-  }
-  const formEnabled =
-    state.modemSleepForm?.enabled === true ||
-    state.modemSleepForm?.enabled === 'true' ||
-    state.modemSleepForm?.enabled === 1 ||
-    state.modemSleepForm?.enabled === '1';
-  setState({ modemSleepSaving: true, modemSleepMessage: '', modemSleepError: '' });
-  try {
-    const response = await fetch(buildEndpoint('/api/modem'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-cache',
-      body: JSON.stringify({ enabled: formEnabled })
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(body?.error ?? `Modem sleep update failed with HTTP ${response.status}`);
-    }
-    const normalized = normalizeModemSleepStatus(body) ?? { enabled: formEnabled };
-    const statusPatch = state.status
-      ? { ...state.status, modemSleep: normalized }
-      : { modemSleep: normalized };
-    setState({
-      modemSleep: normalized,
-      status: statusPatch,
-      modemSleepForm: { enabled: normalized?.enabled ?? formEnabled },
-      modemSleepDirty: false,
-      modemSleepSaving: false,
-      modemSleepMessage: 'Modem sleep updated.',
-      modemSleepError: ''
-    });
-  } catch (error) {
-    console.error(error);
-    setState({
-      modemSleepSaving: false,
-      modemSleepMessage: '',
-      modemSleepError: error?.message ?? 'Unable to update modem sleep.'
-    });
-  }
-}
-
 function activateTab(tabName) {
   if (state.activeTab === tabName) {
     return;
@@ -1976,9 +1488,6 @@ function activateTab(tabName) {
   }
   if (tabName === 'settings' && !state.schedulerStatus && !state.schedulerLoading) {
     fetchSchedulerConfig();
-  }
-  if (tabName === 'settings' && !state.firmwareInfo && !state.otaStatusLoading) {
-    fetchFirmwareStatus();
   }
 }
 
@@ -2129,34 +1638,6 @@ async function fetchWifiScan() {
       wifiMessageType: 'error'
     });
   }
-}
-
-async function fetchFirmwareStatus(force = false) {
-  if (state.otaStatusLoading && !force) {
-    return;
-  }
-  setState({ otaStatusLoading: true });
-  try {
-    const response = await fetch(buildEndpoint('/api/ota'), { cache: 'no-cache' });
-    if (!response.ok) {
-      throw new Error(`Firmware status failed with HTTP ${response.status}`);
-    }
-    const payload = await response.json();
-    applyOtaStatus(payload);
-  } catch (error) {
-    console.error(error);
-    setState({ otaStatusLoading: false });
-  }
-}
-
-function applyOtaStatus(payload) {
-  const firmware = payload?.firmware ?? null;
-  const ota = payload?.ota ?? null;
-  setState({
-    firmwareInfo: firmware ?? state.firmwareInfo,
-    otaStatus: ota ?? state.otaStatus,
-    otaStatusLoading: false
-  });
 }
 
 function applyStatus(payload) {
@@ -2663,15 +2144,6 @@ if (elements.geoCountry) {
   });
 }
 
-if (elements.otaFileInput) {
-  elements.otaFileInput.addEventListener('change', handleOtaFileChange);
-}
-if (elements.otaForm) {
-  elements.otaForm.addEventListener('submit', handleOtaUpload);
-}
-if (elements.otaClearButton) {
-  elements.otaClearButton.addEventListener('click', clearOtaSelection);
-}
 document.addEventListener('click', (event) => {
   const nextPatch = {};
   if (state.timezonePickerOpen && !elements.timezoneSection?.contains(event.target)) {
