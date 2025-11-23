@@ -213,7 +213,8 @@ constexpr TimezoneOption TIMEZONE_OPTIONS[] = {
     {"UTC+12", "UTC+12:00 Fiji", 720},            {"UTC+12_45", "UTC+12:45 Chatham Islands", 765},
     {"UTC+13", "UTC+13:00 Tonga", 780},           {"UTC+14", "UTC+14:00 Line Islands", 840}};
 constexpr size_t TIMEZONE_OPTION_COUNT = sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]);
-constexpr const char *DEFAULT_TIMEZONE_ID = "UTC";
+constexpr const char *DEFAULT_TIMEZONE_ID = "UTC-5";
+constexpr int DEFAULT_TIMEZONE_OFFSET_MINUTES = -300;
 constexpr char PREF_KEY_TIMEZONE_ID[] = "tz_id";
 constexpr char PREF_KEY_TIMEZONE_RENDER_ID[] = "tz_render";
 
@@ -411,7 +412,7 @@ bool fileSystemReady = false;
 time_t lastHourlyBucket = 0;
 bool clockSynchronized = false;
 String activeTimezoneId = DEFAULT_TIMEZONE_ID;
-int activeTimezoneOffsetMinutes = 0;
+int activeTimezoneOffsetMinutes = DEFAULT_TIMEZONE_OFFSET_MINUTES;
 static bool serialConsoleAttached = false;
 static bool serialAnnouncementSent = false;
 

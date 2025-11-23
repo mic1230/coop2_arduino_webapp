@@ -15,6 +15,11 @@ const DEFAULT_SUNRISE_OFFSET = -15;
 const DEFAULT_SUNSET_OFFSET = 30;
 const MIN_SUN_OFFSET = -720;
 const MAX_SUN_OFFSET = 720;
+const DEFAULT_TIMEZONE = {
+  id: 'UTC-5',
+  label: 'UTC-05:00 Eastern',
+  offsetMinutes: -300
+};
 const STORAGE_KEYS = {
   schedulerCoords: 'coopSchedulerCoords'
 };
@@ -944,8 +949,10 @@ function renderTimezonePicker() {
   if (!elements.timezoneTrigger) {
     return;
   }
-  const labelText = state.timezoneConfig?.label ?? 'UTC';
-  const offsetText = formatTimezoneOffset(state.timezoneConfig?.offsetMinutes ?? 0);
+  const labelText = state.timezoneConfig?.label ?? DEFAULT_TIMEZONE.label;
+  const offsetText = formatTimezoneOffset(
+    state.timezoneConfig?.offsetMinutes ?? DEFAULT_TIMEZONE.offsetMinutes
+  );
   if (elements.timezoneLabel) {
     elements.timezoneLabel.textContent = labelText;
   }
@@ -980,7 +987,7 @@ function renderTimezonePicker() {
         button.dataset.timezoneId = option.id ?? '';
         button.disabled = state.timezoneUpdating === option.id;
         const label = document.createElement('span');
-        label.textContent = option.label ?? option.id ?? 'UTC';
+        label.textContent = option.label ?? option.id ?? DEFAULT_TIMEZONE.label;
         const offset = document.createElement('span');
         offset.className = 'timezone-offset';
         offset.textContent = formatTimezoneOffset(option.offsetMinutes);
@@ -1279,11 +1286,12 @@ function formatTravelTimeInputValue(travelTimeMs) {
 }
 
 function formatTimezoneOffset(minutes) {
-  if (typeof minutes !== 'number' || Number.isNaN(minutes)) {
-    return 'UTC+00:00';
-  }
-  const sign = minutes >= 0 ? '+' : '-';
-  const absMinutes = Math.abs(minutes);
+  const safeMinutes =
+    typeof minutes === 'number' && !Number.isNaN(minutes)
+      ? minutes
+      : DEFAULT_TIMEZONE.offsetMinutes;
+  const sign = safeMinutes >= 0 ? '+' : '-';
+  const absMinutes = Math.abs(safeMinutes);
   const hours = Math.floor(absMinutes / 60)
     .toString()
     .padStart(2, '0');
@@ -1314,10 +1322,15 @@ function formatSchedulerDateTime(value) {
 }
 
 function normalizeTimezoneConfig(payload) {
-  const timezoneId = payload?.timezoneId ?? payload?.id ?? 'UTC';
-  const label = payload?.label ?? timezoneId ?? 'UTC';
+  const timezoneId = payload?.timezoneId ?? payload?.id ?? DEFAULT_TIMEZONE.id;
   const offset =
-    typeof payload?.offsetMinutes === 'number' ? payload.offsetMinutes : 0;
+    typeof payload?.offsetMinutes === 'number'
+      ? payload.offsetMinutes
+      : DEFAULT_TIMEZONE.offsetMinutes;
+  let label = payload?.label ?? '';
+  if (!label) {
+    label = timezoneId === DEFAULT_TIMEZONE.id ? DEFAULT_TIMEZONE.label : timezoneId ?? DEFAULT_TIMEZONE.label;
+  }
   return {
     id: timezoneId,
     label,
