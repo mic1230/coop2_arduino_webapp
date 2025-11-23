@@ -4,6 +4,10 @@ const DEFAULT_DOOR_TRAVEL_TIME_MS = 50000;
 const DEFAULT_POMODORO_LENGTH_MS = DEFAULT_DOOR_TRAVEL_TIME_MS;
 const HISTORY_POLL_INTERVAL_MS = 15000;
 const HISTORY_DISPLAY_LIMIT = 30;
+const POWER_SAVE_DEFAULT_SLEEP_SECONDS = 30;
+const POWER_SAVE_MIN_SECONDS = 1;
+const POWER_SAVE_MAX_SECONDS = 200;
+const POWER_SAVE_MIN_AWAKE_SECONDS = 30;
 const GEOCODE_DEBOUNCE_MS = 350;
 const DEFAULT_LATITUDE = 41.505;
 const DEFAULT_LONGITUDE = -81.69;
@@ -69,6 +73,23 @@ const state = {
     sunsetOffsetMinutes: String(DEFAULT_SUNSET_OFFSET)
   },
   schedulerDirty: false,
+  powerSaving: null,
+  powerSavingForm: {
+    enabled: false,
+    sleepSeconds: String(POWER_SAVE_DEFAULT_SLEEP_SECONDS)
+  },
+  powerSavingDirty: false,
+  powerSavingSaving: false,
+  powerSavingMessage: '',
+  powerSavingError: '',
+  modemSleep: null,
+  modemSleepForm: {
+    enabled: false
+  },
+  modemSleepDirty: false,
+  modemSleepSaving: false,
+  modemSleepMessage: '',
+  modemSleepError: '',
   overrideMs: null,
   firmwareInfo: null,
   otaStatus: null,
@@ -183,6 +204,25 @@ const elements = {
   wifiIp: document.querySelector('[data-wifi-ip]'),
   wifiSignal: document.querySelector('[data-wifi-signal]'),
   wifiEmpty: document.querySelector('[data-wifi-empty]'),
+  powerCard: document.querySelector('[data-power-card]'),
+  powerChip: document.querySelector('[data-power-chip]'),
+  powerStatus: document.querySelector('[data-power-status]'),
+  powerNext: document.querySelector('[data-power-next]'),
+  powerEta: document.querySelector('[data-power-eta]'),
+  powerBlockers: document.querySelector('[data-power-blockers]'),
+  powerSleepDisplay: document.querySelector('[data-power-sleep-display]'),
+  powerForm: document.querySelector('[data-power-form]'),
+  powerToggle: document.querySelector('[data-power-toggle]'),
+  powerSleepInput: document.querySelector('[data-power-sleep-input]'),
+  powerSaveButton: document.querySelector('[data-power-save]'),
+  powerResetButton: document.querySelector('[data-power-reset]'),
+  powerMessage: document.querySelector('[data-power-message]'),
+  powerError: document.querySelector('[data-power-error]'),
+  modemToggle: document.querySelector('[data-modem-toggle]'),
+  modemSaveButton: document.querySelector('[data-modem-save]'),
+  modemResetButton: document.querySelector('[data-modem-reset]'),
+  modemMessage: document.querySelector('[data-modem-message]'),
+  modemError: document.querySelector('[data-modem-error]'),
   doorHistoryBody: document.querySelector('[data-door-history-body]'),
   downloadHistoryButton: document.querySelector('[data-download-history]'),
   dashboardPanel: document.querySelector('[data-dashboard-panel]'),
@@ -267,6 +307,14 @@ function doorTargetState() {
 
 function doorBusy() {
   return Boolean(state.status?.door?.busy);
+}
+
+function powerSavingStatus() {
+  return state.powerSaving ?? state.status?.powerSaving ?? null;
+}
+
+function modemSleepStatus() {
+  return state.modemSleep ?? state.status?.modemSleep ?? null;
 }
 
 function buildEndpoint(path) {
@@ -645,11 +693,171 @@ function render() {
     elements.schedulerRefreshButton.disabled = state.schedulerLoading;
   }
 
+  renderPowerSavingCard();
+  renderModemSleep();
   renderWifiScanResults();
   renderDoorHistory();
   renderTimezonePicker();
   renderSchedulerPanel();
   renderGeoSuggest();
+}
+
+function renderPowerSavingCard() {
+  if (!elements.powerCard) {
+    return;
+  }
+  const dashboardActive = state.activeTab === 'dashboard';
+  elements.powerCard.hidden = !dashboardActive || !state.initialized;
+  if (!dashboardActive || !state.initialized) {
+    return;
+  }
+  const status = powerSavingStatus();
+  const form = state.powerSavingForm ?? {};
+  const minSleep = status?.minSleepSeconds ?? POWER_SAVE_MIN_SECONDS;
+  const maxSleep = status?.maxSleepSeconds ?? POWER_SAVE_MAX_SECONDS;
+  const minAwake = status?.minAwakeSeconds ?? POWER_SAVE_MIN_AWAKE_SECONDS;
+  const formHasEnabled = form.enabled !== undefined && form.enabled !== null;
+  const enabledFromForm = formHasEnabled
+    ? form.enabled === true || form.enabled === 'true' || form.enabled === 1 || form.enabled === '1'
+    : null;
+  const enabled = enabledFromForm != null ? enabledFromForm : Boolean(status?.enabled);
+  const sleepValue =
+    form.sleepSeconds ??
+    (status?.sleepSeconds != null ? String(status.sleepSeconds) : String(POWER_SAVE_DEFAULT_SLEEP_SECONDS));
+  const sleepSeconds = parseInt(sleepValue, 10);
+  const validSleep =
+    Number.isFinite(sleepSeconds) && sleepSeconds >= minSleep && sleepSeconds <= maxSleep;
+  const blockers = Array.isArray(status?.blockers) ? status.blockers : [];
+  const blockersText = formatPowerBlockers(blockers);
+  const secondsUntilSleep =
+    typeof status?.secondsUntilSleep === 'number' ? status.secondsUntilSleep : null;
+  const hasBlockers = enabled && blockers.length > 0;
+  const ready = enabled && status?.ready && !hasBlockers && (secondsUntilSleep == null || secondsUntilSleep === 0);
+
+  if (elements.powerChip) {
+    elements.powerChip.className = enabled ? 'chip success' : 'chip danger';
+    elements.powerChip.textContent = enabled ? 'On' : 'Off';
+  }
+  if (elements.powerStatus) {
+    elements.powerStatus.textContent = enabled ? 'Enabled' : 'Disabled';
+  }
+  if (elements.powerSleepDisplay) {
+    elements.powerSleepDisplay.textContent = validSleep ? `${sleepSeconds}s` : '--';
+  }
+
+  let nextText = '--';
+  if (!enabled) {
+    nextText = 'Disabled';
+  } else if (hasBlockers) {
+    nextText = 'Waiting';
+  } else if (secondsUntilSleep == null) {
+    nextText = 'Waiting';
+  } else if (secondsUntilSleep <= 0) {
+    nextText = 'Ready to sleep';
+  } else {
+    nextText = `Sleeping in ${formatSecondsShort(secondsUntilSleep)}`;
+  }
+  if (elements.powerNext) {
+    elements.powerNext.textContent = nextText;
+  }
+
+  let etaText = '';
+  if (enabled) {
+    if (secondsUntilSleep != null && secondsUntilSleep > 0) {
+      etaText = `Minimum awake time left: ${formatSecondsShort(secondsUntilSleep)}.`;
+    } else if (ready) {
+      etaText = 'Device will deep sleep when idle.';
+    } else if (!hasBlockers && secondsUntilSleep == null) {
+      etaText = `Awake at least ${minAwake}s each cycle.`;
+    }
+  } else {
+    etaText = 'Deep sleep is disabled.';
+  }
+  if (elements.powerEta) {
+    elements.powerEta.textContent = etaText || '--';
+  }
+  if (elements.powerBlockers) {
+    const showBlockers = enabled && blockersText;
+    elements.powerBlockers.hidden = !showBlockers;
+    if (showBlockers) {
+      elements.powerBlockers.textContent = blockersText;
+    }
+  }
+
+  const locked = state.powerSavingSaving;
+  if (elements.powerToggle) {
+    elements.powerToggle.checked = Boolean(enabled);
+    elements.powerToggle.disabled = locked;
+  }
+  if (elements.powerSleepInput) {
+    elements.powerSleepInput.value = sleepValue ?? '';
+    elements.powerSleepInput.disabled = locked;
+    elements.powerSleepInput.min = String(minSleep);
+    elements.powerSleepInput.max = String(maxSleep);
+  }
+  if (elements.powerSaveButton) {
+    const canSave = !locked && state.powerSavingDirty && validSleep;
+    elements.powerSaveButton.disabled = !canSave;
+    elements.powerSaveButton.textContent = state.powerSavingSaving ? 'Saving...' : 'Save power settings';
+  }
+  if (elements.powerResetButton) {
+    elements.powerResetButton.disabled = locked || !state.powerSavingDirty;
+  }
+  if (elements.powerMessage) {
+    const showMessage = Boolean(state.powerSavingMessage);
+    elements.powerMessage.hidden = !showMessage;
+    if (showMessage) {
+      elements.powerMessage.textContent = state.powerSavingMessage;
+    }
+  }
+  if (elements.powerError) {
+    const showError = Boolean(state.powerSavingError);
+    elements.powerError.hidden = !showError;
+    if (showError) {
+      elements.powerError.textContent = state.powerSavingError;
+    }
+  }
+}
+
+function renderModemSleep() {
+  if (!elements.powerCard) {
+    return;
+  }
+  const dashboardActive = state.activeTab === 'dashboard';
+  const status = normalizeModemSleepStatus(modemSleepStatus());
+  const form = state.modemSleepForm ?? {};
+  const locked = state.modemSleepSaving;
+  const formEnabled = form.enabled === true || form.enabled === 'true';
+  const enabled = form.hasOwnProperty('enabled')
+    ? formEnabled
+    : status?.enabled ?? false;
+
+  if (elements.modemToggle) {
+    elements.modemToggle.checked = enabled;
+    elements.modemToggle.disabled = locked;
+  }
+  if (elements.modemSaveButton) {
+    const canSave = !locked && state.modemSleepDirty;
+    elements.modemSaveButton.disabled = !canSave || !dashboardActive;
+    elements.modemSaveButton.textContent = locked ? 'Saving...' : 'Save modem sleep';
+  }
+  if (elements.modemResetButton) {
+    elements.modemResetButton.disabled = locked || !state.modemSleepDirty;
+  }
+  if (elements.modemMessage) {
+    const showMessage = Boolean(state.modemSleepMessage);
+    elements.modemMessage.hidden = !showMessage;
+    if (showMessage) {
+      elements.modemMessage.textContent = state.modemSleepMessage;
+    }
+  }
+  if (elements.modemError) {
+    const showError = Boolean(state.modemSleepError);
+    elements.modemError.hidden = !showError;
+    if (showError) {
+      elements.modemError.textContent = state.modemSleepError;
+    }
+  }
 }
 
 function renderDoorHistory() {
@@ -1117,6 +1325,42 @@ function normalizeTimezoneConfig(payload) {
   };
 }
 
+function normalizePowerSavingStatus(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const toNumber = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  const minSleep = toNumber(payload.minSleepSeconds) ?? POWER_SAVE_MIN_SECONDS;
+  const maxSleep = toNumber(payload.maxSleepSeconds) ?? POWER_SAVE_MAX_SECONDS;
+  const minAwake = toNumber(payload.minAwakeSeconds) ?? POWER_SAVE_MIN_AWAKE_SECONDS;
+  let sleepSeconds = toNumber(payload.sleepSeconds) ?? POWER_SAVE_DEFAULT_SLEEP_SECONDS;
+  sleepSeconds = Math.min(Math.max(sleepSeconds, minSleep), maxSleep);
+  const secondsUntilSleepRaw = toNumber(payload.secondsUntilSleep);
+  const secondsUntilSleep =
+    secondsUntilSleepRaw != null ? Math.max(0, secondsUntilSleepRaw) : null;
+  const uptimeSeconds = toNumber(payload.uptimeSeconds);
+  return {
+    enabled: payload.enabled === true || payload.enabled === 'true',
+    sleepSeconds,
+    minSleepSeconds: minSleep,
+    maxSleepSeconds: maxSleep,
+    minAwakeSeconds: minAwake,
+    secondsUntilSleep,
+    uptimeSeconds,
+    ready: payload.ready === true,
+    blockers: Array.isArray(payload.blockers) ? payload.blockers : []
+  };
+}
+
+function normalizeModemSleepStatus(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  return {
+    enabled: payload.enabled === true || payload.enabled === 'true'
+  };
+}
+
 function formatCountdown(ms) {
   if (ms == null) {
     return '--';
@@ -1125,6 +1369,38 @@ function formatCountdown(ms) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes > 0 ? `${minutes}:${seconds.toString().padStart(2, '0')}s` : `${seconds}s`;
+}
+
+function formatSecondsShort(seconds) {
+  if (!Number.isFinite(seconds)) {
+    return '--';
+  }
+  if (seconds >= 3600) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
+  }
+  return `${Math.max(0, Math.round(seconds))}s`;
+}
+
+function formatPowerBlockers(blockers) {
+  if (!Array.isArray(blockers) || !blockers.length) {
+    return '';
+  }
+  const labels = {
+    door_motion: 'Door motion',
+    ota_active: 'OTA update',
+    ota_reboot_pending: 'Pending OTA reboot',
+    config_portal: 'Wi-Fi setup portal',
+    user_activity: 'Active web session'
+  };
+  const parts = blockers.map((entry) => labels[entry] ?? entry?.toString()?.replace(/_/g, ' '));
+  return `Blocked by ${parts.join(', ')}`;
 }
 
 async function fetchDoorHistory() {
@@ -1511,6 +1787,176 @@ function downloadHistoryCsv() {
   document.body.removeChild(link);
 }
 
+function updatePowerFormField(field, value) {
+  setState({
+    powerSavingForm: {
+      ...state.powerSavingForm,
+      [field]: value
+    },
+    powerSavingDirty: true,
+    powerSavingMessage: '',
+    powerSavingError: ''
+  });
+}
+
+function resetPowerForm(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  const current = normalizePowerSavingStatus(powerSavingStatus()) ?? {
+    enabled: false,
+    sleepSeconds: POWER_SAVE_DEFAULT_SLEEP_SECONDS
+  };
+  setState({
+    powerSavingForm: {
+      enabled: current.enabled ?? false,
+      sleepSeconds: String(current.sleepSeconds ?? POWER_SAVE_DEFAULT_SLEEP_SECONDS)
+    },
+    powerSavingDirty: false,
+    powerSavingMessage: '',
+    powerSavingError: ''
+  });
+}
+
+async function handlePowerFormSubmit(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (state.powerSavingSaving) {
+    return;
+  }
+  const status = normalizePowerSavingStatus(powerSavingStatus());
+  const form = state.powerSavingForm ?? {};
+  const minSleep = status?.minSleepSeconds ?? POWER_SAVE_MIN_SECONDS;
+  const maxSleep = status?.maxSleepSeconds ?? POWER_SAVE_MAX_SECONDS;
+  const enabled =
+    form.enabled === undefined || form.enabled === null
+      ? Boolean(status?.enabled)
+      : form.enabled === true || form.enabled === 'true' || form.enabled === 1 || form.enabled === '1';
+  const sleepSeconds = parseInt(form.sleepSeconds, 10);
+  if (!Number.isFinite(sleepSeconds)) {
+    setState({
+      powerSavingError: `Enter a deep sleep duration between ${minSleep} and ${maxSleep} seconds.`
+    });
+    return;
+  }
+  if (sleepSeconds < minSleep || sleepSeconds > maxSleep) {
+    setState({
+      powerSavingError: `Deep sleep must be between ${minSleep} and ${maxSleep} seconds.`
+    });
+    return;
+  }
+  setState({ powerSavingSaving: true, powerSavingMessage: '', powerSavingError: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/power'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-cache',
+      body: JSON.stringify({ enabled, sleepSeconds })
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body?.error ?? `Power saving update failed with HTTP ${response.status}`);
+    }
+    const normalized = normalizePowerSavingStatus(body) ?? { enabled, sleepSeconds };
+    const sleepValue =
+      normalized?.sleepSeconds != null
+        ? String(normalized.sleepSeconds)
+        : String(sleepSeconds);
+    const statusPatch = state.status
+      ? { ...state.status, powerSaving: normalized }
+      : { powerSaving: normalized };
+    setState({
+      powerSaving: normalized,
+      status: statusPatch,
+      powerSavingForm: {
+        enabled: normalized?.enabled ?? enabled,
+        sleepSeconds: sleepValue
+      },
+      powerSavingDirty: false,
+      powerSavingSaving: false,
+      powerSavingMessage: 'Power saving updated.',
+      powerSavingError: ''
+    });
+  } catch (error) {
+    console.error(error);
+    setState({
+      powerSavingSaving: false,
+      powerSavingMessage: '',
+      powerSavingError: error?.message ?? 'Unable to update power saving.'
+    });
+  }
+}
+
+function updateModemFormField(value) {
+  setState({
+    modemSleepForm: { enabled: value },
+    modemSleepDirty: true,
+    modemSleepMessage: '',
+    modemSleepError: ''
+  });
+}
+
+function resetModemForm(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  const status = normalizeModemSleepStatus(modemSleepStatus()) ?? { enabled: false };
+  setState({
+    modemSleepForm: { enabled: status.enabled ?? false },
+    modemSleepDirty: false,
+    modemSleepMessage: '',
+    modemSleepError: ''
+  });
+}
+
+async function handleModemFormSubmit(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (state.modemSleepSaving) {
+    return;
+  }
+  const formEnabled =
+    state.modemSleepForm?.enabled === true ||
+    state.modemSleepForm?.enabled === 'true' ||
+    state.modemSleepForm?.enabled === 1 ||
+    state.modemSleepForm?.enabled === '1';
+  setState({ modemSleepSaving: true, modemSleepMessage: '', modemSleepError: '' });
+  try {
+    const response = await fetch(buildEndpoint('/api/modem'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-cache',
+      body: JSON.stringify({ enabled: formEnabled })
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body?.error ?? `Modem sleep update failed with HTTP ${response.status}`);
+    }
+    const normalized = normalizeModemSleepStatus(body) ?? { enabled: formEnabled };
+    const statusPatch = state.status
+      ? { ...state.status, modemSleep: normalized }
+      : { modemSleep: normalized };
+    setState({
+      modemSleep: normalized,
+      status: statusPatch,
+      modemSleepForm: { enabled: normalized?.enabled ?? formEnabled },
+      modemSleepDirty: false,
+      modemSleepSaving: false,
+      modemSleepMessage: 'Modem sleep updated.',
+      modemSleepError: ''
+    });
+  } catch (error) {
+    console.error(error);
+    setState({
+      modemSleepSaving: false,
+      modemSleepMessage: '',
+      modemSleepError: error?.message ?? 'Unable to update modem sleep.'
+    });
+  }
+}
+
 function activateTab(tabName) {
   if (state.activeTab === tabName) {
     return;
@@ -1714,8 +2160,48 @@ function applyOtaStatus(payload) {
 }
 
 function applyStatus(payload) {
+  const incomingPower = normalizePowerSavingStatus(payload?.powerSaving);
+  const normalizedPower = incomingPower ?? normalizePowerSavingStatus(state.powerSaving);
+  const incomingModem = normalizeModemSleepStatus(payload?.modemSleep);
+  const normalizedModem = incomingModem ?? normalizeModemSleepStatus(state.modemSleep);
+  const mergedStatus = { ...payload };
+  if (normalizedPower) {
+    mergedStatus.powerSaving = normalizedPower;
+  } else if (state.powerSaving) {
+    mergedStatus.powerSaving = state.powerSaving;
+  }
+  if (normalizedModem) {
+    mergedStatus.modemSleep = normalizedModem;
+  } else if (state.modemSleep) {
+    mergedStatus.modemSleep = state.modemSleep;
+  }
+  const shouldSyncPowerForm = !state.powerSavingDirty && normalizedPower;
+  const nextPowerForm = shouldSyncPowerForm
+    ? {
+        enabled: normalizedPower?.enabled ?? false,
+        sleepSeconds:
+          normalizedPower?.sleepSeconds != null
+            ? String(normalizedPower.sleepSeconds)
+            : state.powerSavingForm?.sleepSeconds ?? String(POWER_SAVE_DEFAULT_SLEEP_SECONDS)
+      }
+    : state.powerSavingForm ?? {
+        enabled: normalizedPower?.enabled ?? false,
+        sleepSeconds: normalizedPower?.sleepSeconds != null
+          ? String(normalizedPower.sleepSeconds)
+          : String(POWER_SAVE_DEFAULT_SLEEP_SECONDS)
+      };
+  const shouldSyncModemForm = !state.modemSleepDirty && normalizedModem;
+  const nextModemForm = shouldSyncModemForm
+    ? { enabled: normalizedModem?.enabled ?? false }
+    : state.modemSleepForm ?? { enabled: normalizedModem?.enabled ?? false };
   setState({
-    status: payload,
+    status: mergedStatus,
+    powerSaving: normalizedPower ?? state.powerSaving,
+    powerSavingForm: nextPowerForm,
+    powerSavingDirty: shouldSyncPowerForm ? false : state.powerSavingDirty,
+    modemSleep: normalizedModem ?? state.modemSleep,
+    modemSleepForm: nextModemForm,
+    modemSleepDirty: shouldSyncModemForm ? false : state.modemSleepDirty,
     schedulerStatus: payload?.scheduler ?? state.schedulerStatus,
     lastUpdated: new Date(),
     initialized: true
@@ -1938,6 +2424,33 @@ if (elements.closeButton) {
 }
 if (elements.downloadHistoryButton) {
   elements.downloadHistoryButton.addEventListener('click', downloadHistoryCsv);
+}
+if (elements.powerForm) {
+  elements.powerForm.addEventListener('submit', handlePowerFormSubmit);
+}
+if (elements.powerToggle) {
+  elements.powerToggle.addEventListener('change', (event) => {
+    updatePowerFormField('enabled', event.target.checked);
+  });
+}
+if (elements.powerSleepInput) {
+  elements.powerSleepInput.addEventListener('input', (event) => {
+    updatePowerFormField('sleepSeconds', event.target.value);
+  });
+}
+if (elements.powerResetButton) {
+  elements.powerResetButton.addEventListener('click', resetPowerForm);
+}
+if (elements.modemSaveButton) {
+  elements.modemSaveButton.addEventListener('click', handleModemFormSubmit);
+}
+if (elements.modemToggle) {
+  elements.modemToggle.addEventListener('change', (event) => {
+    updateModemFormField(event.target.checked);
+  });
+}
+if (elements.modemResetButton) {
+  elements.modemResetButton.addEventListener('click', resetModemForm);
 }
 if (elements.timezoneTrigger) {
   elements.timezoneTrigger.addEventListener('click', () => {

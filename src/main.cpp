@@ -10,6 +10,7 @@
 #include <esp_ota_ops.h>
 #include <esp_wifi.h>
 #include <esp32-hal-adc.h>
+#include <esp_sleep.h>
 #include <Wire.h>
 #include <FS.h>
 #include <LittleFS.h>
@@ -216,6 +217,25 @@ constexpr const char *DEFAULT_TIMEZONE_ID = "UTC";
 constexpr char PREF_KEY_TIMEZONE_ID[] = "tz_id";
 constexpr char PREF_KEY_TIMEZONE_RENDER_ID[] = "tz_render";
 
+//==============================================================================
+// Power saving configuration
+//==============================================================================
+constexpr bool POWER_SAVING_DEFAULT_ENABLED = false;
+constexpr uint32_t POWER_SAVING_DEFAULT_SLEEP_SECONDS = 30;
+constexpr uint32_t POWER_SAVING_MIN_SLEEP_SECONDS = 1;
+constexpr uint32_t POWER_SAVING_MAX_SLEEP_SECONDS = 200;
+constexpr uint32_t POWER_SAVING_MIN_AWAKE_MS = 30000;
+constexpr uint32_t POWER_SAVING_USER_ACTIVITY_GRACE_MS = 30000;
+constexpr char PREF_KEY_POWER_SAVING_ENABLED[] = "ps_enabled";
+constexpr char PREF_KEY_POWER_SAVING_SLEEP[] = "ps_sleep_s";
+constexpr bool MODEM_SLEEP_DEFAULT_ENABLED = false;
+constexpr char PREF_KEY_MODEM_SLEEP_ENABLED[] = "modem_sleep";
+
+struct PowerSavingConfig {
+  bool enabled = POWER_SAVING_DEFAULT_ENABLED;
+  uint32_t sleepSeconds = POWER_SAVING_DEFAULT_SLEEP_SECONDS;
+};
+
 struct DoorHistoryEntry;
 
 TwoWire greenhouseSensorWire = TwoWire(0);
@@ -258,6 +278,19 @@ const TimezoneOption *findTimezoneOption(const String &timezoneId);
 void ensureHistoryDisplayTimesCurrent();
 bool rewriteDoorHistoryCsvDisplayTimes();
 void applyTimezoneOption(const TimezoneOption &option);
+PowerSavingConfig sanitizePowerSavingConfig(const PowerSavingConfig &config);
+void loadPowerSavingConfig();
+bool persistPowerSavingConfig(const PowerSavingConfig &config);
+String powerSavingStatusToJson();
+void handlePowerSavingStatus();
+void handlePowerSavingUpdate();
+void updatePowerSaving();
+void loadModemSleepPreference();
+bool persistModemSleepPreference(bool enabled);
+void applyModemSleepSetting();
+String modemSleepStatusToJson();
+void handleModemSleepStatus();
+void handleModemSleepUpdate();
 bool waitForSerial(uint32_t timeoutMs = SERIAL_WAIT_TIMEOUT_MS);
 void updateSerialAttachmentAnnounce();
 bool loadSolarScheduleConfig();
@@ -325,6 +358,11 @@ void persistRetainWifiPreference(bool retain) {
   }
   wifiPrefs.putBool(WIFI_PREF_KEY_RETAIN, retain);
 }
+
+PowerSavingConfig powerSavingConfig;
+uint32_t bootTimestampMs = 0;
+uint32_t lastClientActivityMs = 0;
+bool modemSleepEnabled = MODEM_SLEEP_DEFAULT_ENABLED;
 
 enum class DoorState : uint8_t { Closed, Opened };
 
@@ -1694,6 +1732,182 @@ void maybeRecordHourlyHistory() {
   }
 }
 
+//==============================================================================
+// Power saving (deep sleep) helpers
+//==============================================================================
+PowerSavingConfig sanitizePowerSavingConfig(const PowerSavingConfig &config) {
+  PowerSavingConfig sanitized = config;
+  if (sanitized.sleepSeconds < POWER_SAVING_MIN_SLEEP_SECONDS) {
+    sanitized.sleepSeconds = POWER_SAVING_MIN_SLEEP_SECONDS;
+  } else if (sanitized.sleepSeconds > POWER_SAVING_MAX_SLEEP_SECONDS) {
+    sanitized.sleepSeconds = POWER_SAVING_MAX_SLEEP_SECONDS;
+  }
+  return sanitized;
+}
+
+void loadPowerSavingConfig() {
+  PowerSavingConfig loaded;
+  if (initDoorPreferences()) {
+    loaded.enabled =
+        doorPrefs.getBool(PREF_KEY_POWER_SAVING_ENABLED, POWER_SAVING_DEFAULT_ENABLED);
+    loaded.sleepSeconds =
+        doorPrefs.getUInt(PREF_KEY_POWER_SAVING_SLEEP, POWER_SAVING_DEFAULT_SLEEP_SECONDS);
+  }
+  powerSavingConfig = sanitizePowerSavingConfig(loaded);
+}
+
+bool persistPowerSavingConfig(const PowerSavingConfig &config) {
+  if (!initDoorPreferences()) {
+    Serial.println("Unable to persist power saving config (prefs unavailable).");
+    return false;
+  }
+  powerSavingConfig = sanitizePowerSavingConfig(config);
+  doorPrefs.putBool(PREF_KEY_POWER_SAVING_ENABLED, powerSavingConfig.enabled);
+  doorPrefs.putUInt(PREF_KEY_POWER_SAVING_SLEEP, powerSavingConfig.sleepSeconds);
+  return true;
+}
+
+String powerSavingStatusToJson() {
+  powerSavingConfig = sanitizePowerSavingConfig(powerSavingConfig);
+  const bool doorBusy = doorMotion.motion != DoorMotion::Idle;
+  const bool otaBusy = otaUpdateState.active;
+  const bool otaPending = otaUpdateState.rebootPending;
+  const bool portalActive = configPortalActive;
+  const uint32_t nowMs = millis();
+  const bool userActive =
+      lastClientActivityMs > 0 && nowMs >= lastClientActivityMs &&
+      nowMs - lastClientActivityMs < POWER_SAVING_USER_ACTIVITY_GRACE_MS;
+  const bool blocked = doorBusy || otaBusy || otaPending || portalActive || userActive;
+  const uint32_t awakeMs = nowMs - bootTimestampMs;
+  const uint32_t uptimeSeconds = nowMs / 1000;
+  const uint32_t minAwakeSeconds = POWER_SAVING_MIN_AWAKE_MS / 1000;
+  uint32_t remainingAwakeMs = 0;
+  if (awakeMs < POWER_SAVING_MIN_AWAKE_MS) {
+    remainingAwakeMs = POWER_SAVING_MIN_AWAKE_MS - awakeMs;
+  }
+  bool hasSleepEta = powerSavingConfig.enabled && !blocked;
+  uint32_t secondsUntilSleep = 0;
+  if (hasSleepEta && remainingAwakeMs > 0) {
+    secondsUntilSleep = (remainingAwakeMs + 999) / 1000;
+  }
+  const bool readyForSleep = hasSleepEta && remainingAwakeMs == 0;
+
+  String json;
+  json.reserve(320);
+  json += F("{\"enabled\":");
+  json += powerSavingConfig.enabled ? F("true") : F("false");
+  json += F(",\"sleepSeconds\":");
+  json += String(powerSavingConfig.sleepSeconds);
+  json += F(",\"minSleepSeconds\":");
+  json += String(POWER_SAVING_MIN_SLEEP_SECONDS);
+  json += F(",\"maxSleepSeconds\":");
+  json += String(POWER_SAVING_MAX_SLEEP_SECONDS);
+  json += F(",\"minAwakeSeconds\":");
+  json += String(minAwakeSeconds);
+  json += F(",\"uptimeSeconds\":");
+  json += String(uptimeSeconds);
+  json += F(",\"ready\":");
+  json += readyForSleep ? F("true") : F("false");
+  json += F(",\"secondsUntilSleep\":");
+  if (hasSleepEta) {
+    json += String(secondsUntilSleep);
+  } else {
+    json += F("null");
+  }
+  json += F(",\"blockers\":[");
+  size_t count = 0;
+  auto appendBlocker = [&](const char *label) {
+    if (count > 0) {
+      json += ',';
+    }
+    json += '"';
+    json += label;
+    json += '"';
+    ++count;
+  };
+  if (doorBusy) {
+    appendBlocker("door_motion");
+  }
+  if (otaBusy) {
+    appendBlocker("ota_active");
+  }
+  if (otaPending) {
+    appendBlocker("ota_reboot_pending");
+  }
+  if (portalActive) {
+    appendBlocker("config_portal");
+  }
+  if (userActive) {
+    appendBlocker("user_activity");
+  }
+  json += F("]}");
+  return json;
+}
+
+void updatePowerSaving() {
+  const PowerSavingConfig config = sanitizePowerSavingConfig(powerSavingConfig);
+  if (!config.enabled) {
+    return;
+  }
+  if (doorMotion.motion != DoorMotion::Idle) {
+    return;
+  }
+  if (otaUpdateState.active || otaUpdateState.rebootPending) {
+    return;
+  }
+  if (configPortalActive) {
+    return;
+  }
+  const uint32_t nowMs = millis();
+  if (lastClientActivityMs > 0 && nowMs >= lastClientActivityMs &&
+      nowMs - lastClientActivityMs < POWER_SAVING_USER_ACTIVITY_GRACE_MS) {
+    return;
+  }
+  const uint32_t awakeMs = nowMs - bootTimestampMs;
+  if (awakeMs < POWER_SAVING_MIN_AWAKE_MS) {
+    return;
+  }
+  const uint64_t sleepMicros = static_cast<uint64_t>(config.sleepSeconds) * 1000000ULL;
+  Serial.printf("Entering deep sleep for %lus (power saving).\n",
+                static_cast<unsigned long>(config.sleepSeconds));
+  recordDoorHistory("power_saving_sleep");
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup(sleepMicros);
+  esp_deep_sleep_start();
+}
+
+void loadModemSleepPreference() {
+  modemSleepEnabled = MODEM_SLEEP_DEFAULT_ENABLED;
+  if (initDoorPreferences()) {
+    modemSleepEnabled = doorPrefs.getBool(PREF_KEY_MODEM_SLEEP_ENABLED, MODEM_SLEEP_DEFAULT_ENABLED);
+  }
+}
+
+bool persistModemSleepPreference(bool enabled) {
+  modemSleepEnabled = enabled;
+  if (!initDoorPreferences()) {
+    Serial.println("Unable to persist modem sleep preference (prefs unavailable).");
+    return false;
+  }
+  doorPrefs.putBool(PREF_KEY_MODEM_SLEEP_ENABLED, modemSleepEnabled);
+  return true;
+}
+
+void applyModemSleepSetting() {
+  const bool success = WiFi.setSleep(modemSleepEnabled);
+  Serial.printf("Modem sleep %s (setSleep result=%s).\n", modemSleepEnabled ? "enabled" : "disabled",
+                success ? "true" : "false");
+}
+
+String modemSleepStatusToJson() {
+  String json;
+  json.reserve(64);
+  json += F("{\"enabled\":");
+  json += modemSleepEnabled ? F("true") : F("false");
+  json += F("}");
+  return json;
+}
+
 bool waitForSerial(uint32_t timeoutMs) {
   const uint32_t start = millis();
   while (!Serial) {
@@ -1985,6 +2199,7 @@ void sendCorsHeaders() {
 }
 
 void sendJsonResponse(int statusCode, const String &body) {
+  lastClientActivityMs = millis();
   sendCorsHeaders();
   apiServer.send(statusCode, F("application/json"), body);
 }
@@ -1998,6 +2213,7 @@ void handleApiRoot() {
   String json =
       F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
         "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/api/schedule\","
+        "\"/api/power\",\"/api/modem\","
         "\"/api/ota\",\"/api/ota/upload\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
@@ -2098,13 +2314,17 @@ void handleStatusEndpoint() {
   const DoorState state = getDoorPosition();
   const SensorReadings readings = getSensorReadings();
   String json;
-  json.reserve(480);
+  json.reserve(640);
   json += F("{\"door\":");
   json += doorStatusToJson(state);
   json += F(",\"sensors\":");
   json += sensorReadingsToJson(readings);
   json += F(",\"wifi\":");
   json += wifiStatusToJson();
+  json += F(",\"modemSleep\":");
+  json += modemSleepStatusToJson();
+  json += F(",\"powerSaving\":");
+  json += powerSavingStatusToJson();
   json += F(",\"scheduler\":");
   json += solarSchedulerStatusToJson(false);
   json += F("}");
@@ -2495,6 +2715,94 @@ void handleSolarScheduleUpdate() {
   sendJsonResponse(200, solarSchedulerStatusToJson(true));
 }
 
+void handlePowerSavingStatus() {
+  sendJsonResponse(200, powerSavingStatusToJson());
+}
+
+void handlePowerSavingUpdate() {
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  ArduinoJson::JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
+    return;
+  }
+  PowerSavingConfig next = powerSavingConfig;
+  bool changed = false;
+  if (!doc["enabled"].isNull()) {
+    next.enabled = doc["enabled"].as<bool>();
+    changed = true;
+  }
+  if (!doc["sleepSeconds"].isNull()) {
+    const int requested = doc["sleepSeconds"].as<int>();
+    if (requested < static_cast<int>(POWER_SAVING_MIN_SLEEP_SECONDS) ||
+        requested > static_cast<int>(POWER_SAVING_MAX_SLEEP_SECONDS)) {
+      sendJsonResponse(400, F("{\"error\":\"invalid_sleep_seconds\"}"));
+      return;
+    }
+    const uint32_t clamped = static_cast<uint32_t>(requested);
+    if (clamped != next.sleepSeconds) {
+      next.sleepSeconds = clamped;
+      changed = true;
+    }
+  }
+  next = sanitizePowerSavingConfig(next);
+  if (!changed) {
+    sendJsonResponse(200, powerSavingStatusToJson());
+    return;
+  }
+  if (!persistPowerSavingConfig(next)) {
+    sendJsonResponse(500, F("{\"error\":\"save_failed\"}"));
+    return;
+  }
+  sendJsonResponse(200, powerSavingStatusToJson());
+}
+
+void handleModemSleepStatus() {
+  sendJsonResponse(200, modemSleepStatusToJson());
+}
+
+void handleModemSleepUpdate() {
+  if (!apiServer.hasArg("plain")) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  const String body = apiServer.arg("plain");
+  if (body.isEmpty()) {
+    sendJsonResponse(400, F("{\"error\":\"missing_body\"}"));
+    return;
+  }
+  ArduinoJson::JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, body);
+  if (error) {
+    sendJsonResponse(400, F("{\"error\":\"invalid_json\"}"));
+    return;
+  }
+  if (doc["enabled"].isNull()) {
+    sendJsonResponse(400, F("{\"error\":\"enabled_required\"}"));
+    return;
+  }
+  const bool requested = doc["enabled"].as<bool>();
+  if (requested == modemSleepEnabled) {
+    sendJsonResponse(200, modemSleepStatusToJson());
+    return;
+  }
+  if (!persistModemSleepPreference(requested)) {
+    sendJsonResponse(500, F("{\"error\":\"save_failed\"}"));
+    return;
+  }
+  applyModemSleepSetting();
+  sendJsonResponse(200, modemSleepStatusToJson());
+}
+
 
 void announceConfigPortalStatus(bool force) {
   if (!configPortalActive) {
@@ -2616,6 +2924,7 @@ void startConfigPortal() {
   if (!WiFi.softAP(WIFI_CONFIG_AP_SSID)) {
     Serial.println("Failed to start Wi-Fi config AP.");
   }
+  applyModemSleepSetting();
   WiFi.softAPConfig(CONFIG_PORTAL_IP, CONFIG_PORTAL_IP, CONFIG_PORTAL_NETMASK);
   startCaptiveDns(CONFIG_PORTAL_IP);
   announceConfigPortalStatus(true);
@@ -2648,6 +2957,12 @@ void startApiServer() {
   apiServer.on("/api/schedule", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/schedule", HTTP_GET, handleSolarScheduleStatus);
   apiServer.on("/api/schedule", HTTP_POST, handleSolarScheduleUpdate);
+  apiServer.on("/api/power", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/power", HTTP_GET, handlePowerSavingStatus);
+  apiServer.on("/api/power", HTTP_POST, handlePowerSavingUpdate);
+  apiServer.on("/api/modem", HTTP_OPTIONS, handleOptions);
+  apiServer.on("/api/modem", HTTP_GET, handleModemSleepStatus);
+  apiServer.on("/api/modem", HTTP_POST, handleModemSleepUpdate);
   apiServer.on("/api/ota", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/ota", HTTP_GET, handleOtaStatus);
   apiServer.on("/api/ota/upload", HTTP_OPTIONS, handleOptions);
@@ -2666,6 +2981,7 @@ void startApiServer() {
 //==============================================================================
 void setup() {
   Serial.begin(115200);
+  bootTimestampMs = millis();
   const bool serialReady = waitForSerial(SERIAL_WAIT_TIMEOUT_MS);
   if (!serialReady) {
     Serial.println(F("Serial console not detected within timeout; continuing headless."));
@@ -2678,6 +2994,8 @@ void setup() {
 
   ensureFileSystem();
   initDoorPreferences();
+  loadPowerSavingConfig();
+  loadModemSleepPreference();
   initDoorHardware(true);
   loadSolarScheduleConfig();
   loadSolarScheduleExecutionState();
@@ -2703,6 +3021,7 @@ void setup() {
     Serial.print("Wi-Fi ready. IP address: ");
     Serial.println(WiFi.localIP());
     syncClock();
+    applyModemSleepSetting();
   } else {
     Serial.println("Wi-Fi unavailable; starting configuration portal.");
     startConfigPortal();
@@ -2739,6 +3058,7 @@ void loop() {
       ESP.restart();
     }
   }
+  updatePowerSaving();
   delay(10);
 }
 
