@@ -1,25 +1,26 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
+#include <FS.h>
+#include <LittleFS.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <WebServer.h>
-#include <DNSServer.h>
-#include <ArduinoJson.h>
-#include <Update.h>
+#include <Wire.h>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <esp32-hal-adc.h>
 #include <esp_app_format.h>
 #include <esp_ota_ops.h>
 #include <esp_wifi.h>
-#include <esp32-hal-adc.h>
-#include <Wire.h>
-#include <FS.h>
-#include <LittleFS.h>
+#include <sstream>
+#include <string>
 #include <time.h>
 #include <vector>
-#include <cstring>
-#include <algorithm>
-#include <string>
-#include <sstream>
-#include <cmath>
 
 #include "web_assets.h"
 
@@ -42,9 +43,11 @@ struct NetworkCandidate {
 
 // Populate with your own trusted networks (keep empty for portal-only setup).
 constexpr NetworkCredential WIFI_NETWORKS[] = {
-    {"YOUR_HOME_NETWORK", "CHANGE_ME"},
+    {"RP_MOLDOVA", "Mi22021987"},             // Primary: IoT-dedicated network
+    {"Mircea's Wi-Fi Network", "Mi22021987"}, // Secondary: Backup network
 };
-constexpr size_t WIFI_NETWORK_COUNT = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
+constexpr size_t WIFI_NETWORK_COUNT =
+    sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
 
 const IPAddress PING_ADDRESS(8, 8, 8, 8);
 constexpr uint16_t PING_PORT = 53;
@@ -56,7 +59,8 @@ constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 5000;
 constexpr const char *WIFI_CREDENTIAL_PATH = "/wifi_config.json";
 constexpr bool DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT = true;
-bool retainWifiCredentialsAfterReboot = DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT;
+bool retainWifiCredentialsAfterReboot =
+    DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT;
 constexpr const char *WIFI_CONFIG_AP_SSID = "CoopDoorSetup";
 constexpr uint32_t CONFIG_PORTAL_ANNOUNCE_INTERVAL_MS = 15000;
 const IPAddress CONFIG_PORTAL_IP(192, 168, 4, 1);
@@ -69,7 +73,8 @@ struct StoredCredential {
 };
 
 bool checkInternet();
-size_t collectConfiguredNetworks(NetworkCandidate *candidates, size_t maxCandidates);
+size_t collectConfiguredNetworks(NetworkCandidate *candidates,
+                                 size_t maxCandidates);
 void sortCandidates(NetworkCandidate *candidates, size_t count);
 bool connectToWifi();
 bool attemptWifiConnection(const char *ssid, const char *password);
@@ -98,7 +103,8 @@ constexpr uint32_t MIN_DOOR_TRAVEL_TIME_MS = 1000;
 constexpr uint32_t MAX_DOOR_TRAVEL_TIME_MS = 600000;
 constexpr bool RELAY_ACTIVE_STATE = LOW;
 constexpr bool RELAY_IDLE_STATE = HIGH;
-constexpr bool TEST_MODE = false;  // When true, relays are not driven; logs only.
+constexpr bool TEST_MODE =
+    false; // When true, relays are not driven; logs only.
 constexpr bool SERIAL_HEARTBEAT_ENABLED = false;
 constexpr bool VERBOSE_LOGS = false;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
@@ -106,11 +112,12 @@ constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 2000;
 //==============================================================================
 // Sensor configuration (ported from MicroPython get_sensor_readings)
 //==============================================================================
-constexpr uint8_t BATTERY_ADC_PIN = 1;  // Matches MicroPython's ADC Pin 1
-constexpr uint8_t DEFAULT_AVAILABLE_GPIO_PINS[] = {2,  4,  5,  12, 13, 14, 15, 16, 17, 18,
-                                                   19, 21, 22, 23, 25, 26, 27, 32, 33};
+constexpr uint8_t BATTERY_ADC_PIN = 1; // Matches MicroPython's ADC Pin 1
+constexpr uint8_t DEFAULT_AVAILABLE_GPIO_PINS[] = {
+    2, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
 constexpr size_t DEFAULT_AVAILABLE_GPIO_PIN_COUNT =
-    sizeof(DEFAULT_AVAILABLE_GPIO_PINS) / sizeof(DEFAULT_AVAILABLE_GPIO_PINS[0]);
+    sizeof(DEFAULT_AVAILABLE_GPIO_PINS) /
+    sizeof(DEFAULT_AVAILABLE_GPIO_PINS[0]);
 
 struct DoorPinConfig {
   uint8_t openPin = 21;
@@ -120,11 +127,12 @@ struct DoorPinConfig {
   uint32_t travelTimeMs = DEFAULT_DOOR_TRAVEL_TIME_MS;
 };
 
-constexpr DoorPinConfig DEFAULT_DOOR_PIN_ASSIGNMENTS = {21, 20, 22, 23, DEFAULT_DOOR_TRAVEL_TIME_MS};
+constexpr DoorPinConfig DEFAULT_DOOR_PIN_ASSIGNMENTS = {
+    21, 20, 22, 23, DEFAULT_DOOR_TRAVEL_TIME_MS};
 
 DoorPinConfig doorPinConfig = DEFAULT_DOOR_PIN_ASSIGNMENTS;
 constexpr float ADC_REFERENCE_VOLTS = 3.3f;
-constexpr float VOLTAGE_DIVIDER_RATIO = 0.8333f;  // 10k / (10k + 2k)
+constexpr float VOLTAGE_DIVIDER_RATIO = 0.8333f; // 10k / (10k + 2k)
 constexpr uint8_t SHT31_I2C_ADDRESS = 0x44;
 constexpr uint16_t SHT31_MEASUREMENT_DELAY_MS = 20;
 constexpr uint8_t INVALID_PIN = 0xFF;
@@ -138,7 +146,8 @@ constexpr const char *DOOR_HISTORY_CSV_PATH = "/door_history.csv";
 constexpr size_t DOOR_HISTORY_MAX_BYTES = 1024 * 1024;
 constexpr uint32_t DOOR_HISTORY_HOURLY_SECONDS = 60 * 60;
 constexpr const char *DOOR_HISTORY_CSV_HEADER =
-    "timestamp,display_time,door_state,greenhouse_temp_c,greenhouse_humidity_pct,battery_voltage,event\n";
+    "timestamp,display_time,door_state,greenhouse_temp_c,greenhouse_humidity_"
+    "pct,battery_voltage,event\n";
 constexpr const char *DOOR_HISTORY_CSV_TEMP_PATH = "/door_history.tmp";
 
 //==============================================================================
@@ -192,26 +201,44 @@ struct TimezoneOption {
 };
 
 constexpr TimezoneOption TIMEZONE_OPTIONS[] = {
-    {"UTC-12", "UTC-12:00 Baker Island", -720},   {"UTC-11", "UTC-11:00 Niue", -660},
-    {"UTC-10", "UTC-10:00 Hawaii-Aleutian", -600},{"UTC-9", "UTC-09:00 Alaska", -540},
-    {"UTC-8", "UTC-08:00 Pacific", -480},         {"UTC-7", "UTC-07:00 Mountain", -420},
-    {"UTC-6", "UTC-06:00 Central", -360},         {"UTC-5", "UTC-05:00 Eastern", -300},
-    {"UTC-4", "UTC-04:00 Atlantic", -240},        {"UTC-3_30", "UTC-03:30 Newfoundland", -210},
-    {"UTC-3", "UTC-03:00 Argentina/Brazil", -180},{"UTC-2", "UTC-02:00 South Georgia", -120},
-    {"UTC-1", "UTC-01:00 Azores", -60},           {"UTC", "UTC", 0},
-    {"UTC+1", "UTC+01:00 Central Europe", 60},    {"UTC+2", "UTC+02:00 Eastern Europe", 120},
-    {"UTC+3", "UTC+03:00 Moscow", 180},           {"UTC+3_30", "UTC+03:30 Iran", 210},
-    {"UTC+4", "UTC+04:00 Gulf", 240},             {"UTC+4_30", "UTC+04:30 Afghanistan", 270},
-    {"UTC+5", "UTC+05:00 Pakistan", 300},         {"UTC+5_30", "UTC+05:30 India", 330},
-    {"UTC+5_45", "UTC+05:45 Nepal", 345},         {"UTC+6", "UTC+06:00 Bangladesh", 360},
-    {"UTC+6_30", "UTC+06:30 Myanmar", 390},       {"UTC+7", "UTC+07:00 Indochina", 420},
-    {"UTC+8", "UTC+08:00 China/West Aus", 480},   {"UTC+9", "UTC+09:00 Japan/Korea", 540},
+    {"UTC-12", "UTC-12:00 Baker Island", -720},
+    {"UTC-11", "UTC-11:00 Niue", -660},
+    {"UTC-10", "UTC-10:00 Hawaii-Aleutian", -600},
+    {"UTC-9", "UTC-09:00 Alaska", -540},
+    {"UTC-8", "UTC-08:00 Pacific", -480},
+    {"UTC-7", "UTC-07:00 Mountain", -420},
+    {"UTC-6", "UTC-06:00 Central", -360},
+    {"UTC-5", "UTC-05:00 Eastern", -300},
+    {"UTC-4", "UTC-04:00 Atlantic", -240},
+    {"UTC-3_30", "UTC-03:30 Newfoundland", -210},
+    {"UTC-3", "UTC-03:00 Argentina/Brazil", -180},
+    {"UTC-2", "UTC-02:00 South Georgia", -120},
+    {"UTC-1", "UTC-01:00 Azores", -60},
+    {"UTC", "UTC", 0},
+    {"UTC+1", "UTC+01:00 Central Europe", 60},
+    {"UTC+2", "UTC+02:00 Eastern Europe", 120},
+    {"UTC+3", "UTC+03:00 Moscow", 180},
+    {"UTC+3_30", "UTC+03:30 Iran", 210},
+    {"UTC+4", "UTC+04:00 Gulf", 240},
+    {"UTC+4_30", "UTC+04:30 Afghanistan", 270},
+    {"UTC+5", "UTC+05:00 Pakistan", 300},
+    {"UTC+5_30", "UTC+05:30 India", 330},
+    {"UTC+5_45", "UTC+05:45 Nepal", 345},
+    {"UTC+6", "UTC+06:00 Bangladesh", 360},
+    {"UTC+6_30", "UTC+06:30 Myanmar", 390},
+    {"UTC+7", "UTC+07:00 Indochina", 420},
+    {"UTC+8", "UTC+08:00 China/West Aus", 480},
+    {"UTC+9", "UTC+09:00 Japan/Korea", 540},
     {"UTC+9_30", "UTC+09:30 Central Australia", 570},
     {"UTC+10", "UTC+10:00 Eastern Australia", 600},
-    {"UTC+10_30", "UTC+10:30 Lord Howe", 630},    {"UTC+11", "UTC+11:00 Magadan", 660},
-    {"UTC+12", "UTC+12:00 Fiji", 720},            {"UTC+12_45", "UTC+12:45 Chatham Islands", 765},
-    {"UTC+13", "UTC+13:00 Tonga", 780},           {"UTC+14", "UTC+14:00 Line Islands", 840}};
-constexpr size_t TIMEZONE_OPTION_COUNT = sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]);
+    {"UTC+10_30", "UTC+10:30 Lord Howe", 630},
+    {"UTC+11", "UTC+11:00 Magadan", 660},
+    {"UTC+12", "UTC+12:00 Fiji", 720},
+    {"UTC+12_45", "UTC+12:45 Chatham Islands", 765},
+    {"UTC+13", "UTC+13:00 Tonga", 780},
+    {"UTC+14", "UTC+14:00 Line Islands", 840}};
+constexpr size_t TIMEZONE_OPTION_COUNT =
+    sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]);
 constexpr const char *DEFAULT_TIMEZONE_ID = "UTC";
 constexpr char PREF_KEY_TIMEZONE_ID[] = "tz_id";
 constexpr char PREF_KEY_TIMEZONE_RENDER_ID[] = "tz_render";
@@ -244,7 +271,8 @@ void syncClock();
 time_t currentTimestamp();
 String formatHistoryTimestamp(time_t ts);
 String formatDoorHistoryCsvLine(const DoorHistoryEntry &entry);
-bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut, bool legacyFormat);
+bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut,
+                             bool legacyFormat);
 void pushDoorHistoryEntry(const DoorHistoryEntry &entry);
 bool serveEmbeddedAsset(WebServer &server, const String &requestPath);
 void handleWebIndex();
@@ -308,19 +336,22 @@ bool initWifiPreferences() {
   }
   initialized = wifiPrefs.begin(WIFI_PREF_NAMESPACE, false);
   if (!initialized) {
-    Serial.println("Failed to open Wi-Fi preferences; using default retain setting.");
-    retainWifiCredentialsAfterReboot = DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT;
+    Serial.println(
+        "Failed to open Wi-Fi preferences; using default retain setting.");
+    retainWifiCredentialsAfterReboot =
+        DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT;
     return false;
   }
-  retainWifiCredentialsAfterReboot =
-      wifiPrefs.getBool(WIFI_PREF_KEY_RETAIN, DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT);
+  retainWifiCredentialsAfterReboot = wifiPrefs.getBool(
+      WIFI_PREF_KEY_RETAIN, DEFAULT_RETAIN_WIFI_CREDENTIALS_AFTER_REBOOT);
   return true;
 }
 
 void persistRetainWifiPreference(bool retain) {
   retainWifiCredentialsAfterReboot = retain;
   if (!initWifiPreferences()) {
-    Serial.println("Unable to persist Wi-Fi retain preference (prefs unavailable).");
+    Serial.println(
+        "Unable to persist Wi-Fi retain preference (prefs unavailable).");
     return;
   }
   wifiPrefs.putBool(WIFI_PREF_KEY_RETAIN, retain);
@@ -404,13 +435,15 @@ DoorState doorStateFromString(const String &value) {
 
 void initDoorHardware(bool force = false) {
   if (TEST_MODE) {
-    Serial.println("TEST MODE: Door relays not initialized; hardware outputs disabled.");
+    Serial.println(
+        "TEST MODE: Door relays not initialized; hardware outputs disabled.");
     return;
   }
 
   const uint8_t openPin = doorPinConfig.openPin;
   const uint8_t closePin = doorPinConfig.closePin;
-  if (!force && configuredRelayOpenPin == openPin && configuredRelayClosePin == closePin) {
+  if (!force && configuredRelayOpenPin == openPin &&
+      configuredRelayClosePin == closePin) {
     return;
   }
 
@@ -423,8 +456,9 @@ void initDoorHardware(bool force = false) {
   configurePin(closePin);
   configuredRelayOpenPin = openPin;
   configuredRelayClosePin = closePin;
-  Serial.printf("Door relays initialized on pins open=%u close=%u (active-low).\n",
-                static_cast<unsigned>(openPin), static_cast<unsigned>(closePin));
+  Serial.printf(
+      "Door relays initialized on pins open=%u close=%u (active-low).\n",
+      static_cast<unsigned>(openPin), static_cast<unsigned>(closePin));
 }
 
 bool initDoorPreferences() {
@@ -434,7 +468,8 @@ bool initDoorPreferences() {
   }
   initialized = doorPrefs.begin(PREF_NAMESPACE, false);
   if (!initialized) {
-    Serial.println("Failed to open Preferences storage; door state will not persist.");
+    Serial.println(
+        "Failed to open Preferences storage; door state will not persist.");
   } else {
     Serial.println("Door state storage ready.");
   }
@@ -460,28 +495,29 @@ void setDoorPosition(DoorState state) {
 
 const char *doorMotionToString(DoorMotion motion) {
   switch (motion) {
-    case DoorMotion::Opening:
-      return "opening";
-    case DoorMotion::Closing:
-      return "closing";
-    default:
-      return "idle";
+  case DoorMotion::Opening:
+    return "opening";
+  case DoorMotion::Closing:
+    return "closing";
+  default:
+    return "idle";
   }
 }
 
 const char *doorCommandResultToString(DoorCommandResult result) {
   switch (result) {
-    case DoorCommandResult::Accepted:
-      return "accepted";
-    case DoorCommandResult::AlreadyAtTarget:
-      return "already_at_target";
-    case DoorCommandResult::Busy:
-      return "busy";
+  case DoorCommandResult::Accepted:
+    return "accepted";
+  case DoorCommandResult::AlreadyAtTarget:
+    return "already_at_target";
+  case DoorCommandResult::Busy:
+    return "busy";
   }
   return "unknown";
 }
 
-void logDoorStatusIfChanged(const __FlashStringHelper *tag, DoorState persistedState) {
+void logDoorStatusIfChanged(const __FlashStringHelper *tag,
+                            DoorState persistedState) {
   static bool initialized = false;
   static DoorState lastState = DoorState::Closed;
   static DoorMotion lastMotion = DoorMotion::Idle;
@@ -490,7 +526,8 @@ void logDoorStatusIfChanged(const __FlashStringHelper *tag, DoorState persistedS
   const DoorMotion motion = doorMotion.motion;
   const bool busy = motion != DoorMotion::Idle;
 
-  if (!initialized || persistedState != lastState || motion != lastMotion || busy != lastBusy) {
+  if (!initialized || persistedState != lastState || motion != lastMotion ||
+      busy != lastBusy) {
     Serial.print(F("[door] "));
     if (tag != nullptr) {
       Serial.print(tag);
@@ -520,7 +557,8 @@ void logDoorStatusIfChanged(const __FlashStringHelper *tag) {
 }
 
 uint8_t relayPinForMotion(DoorMotion motion) {
-  return motion == DoorMotion::Opening ? doorPinConfig.openPin : doorPinConfig.closePin;
+  return motion == DoorMotion::Opening ? doorPinConfig.openPin
+                                       : doorPinConfig.closePin;
 }
 
 void setRelayState(uint8_t pin, bool active) {
@@ -528,7 +566,8 @@ void setRelayState(uint8_t pin, bool active) {
     return;
   }
   if (TEST_MODE) {
-    Serial.printf("TEST MODE: Relay pin %u -> %s.\n", pin, active ? "ACTIVE" : "IDLE");
+    Serial.printf("TEST MODE: Relay pin %u -> %s.\n", pin,
+                  active ? "ACTIVE" : "IDLE");
     return;
   }
   digitalWrite(pin, active ? RELAY_ACTIVE_STATE : RELAY_IDLE_STATE);
@@ -538,7 +577,6 @@ void stopAllRelays() {
   setRelayState(doorPinConfig.openPin, false);
   setRelayState(doorPinConfig.closePin, false);
 }
-
 
 String chipDescriptor() {
   std::ostringstream oss;
@@ -557,12 +595,12 @@ String chipDescriptor() {
 
 const char *otaResultToString(OtaResult result) {
   switch (result) {
-    case OtaResult::Success:
-      return "success";
-    case OtaResult::Error:
-      return "error";
-    default:
-      return "idle";
+  case OtaResult::Success:
+    return "success";
+  case OtaResult::Error:
+    return "error";
+  default:
+    return "idle";
   }
 }
 
@@ -593,7 +631,8 @@ void beginOtaTracking(const String &filename, size_t expectedBytes) {
 void completeOtaSuccess(size_t totalBytes) {
   otaUpdateState.active = false;
   otaUpdateState.rebootPending = true;
-  const size_t finalSize = totalBytes > 0 ? totalBytes : otaUpdateState.receivedBytes;
+  const size_t finalSize =
+      totalBytes > 0 ? totalBytes : otaUpdateState.receivedBytes;
   otaUpdateState.totalBytes = finalSize;
   otaUpdateState.receivedBytes = finalSize;
   otaUpdateState.completedMs = millis();
@@ -691,13 +730,15 @@ String otaStatusToJson() {
 
 bool beginDoorMotion(DoorMotion motion) {
   if (doorMotion.motion != DoorMotion::Idle) {
-    Serial.printf("Rejecting %s request - door already %s.\n", doorMotionToString(motion),
+    Serial.printf("Rejecting %s request - door already %s.\n",
+                  doorMotionToString(motion),
                   doorMotionToString(doorMotion.motion));
     return false;
   }
   doorMotion.motion = motion;
   doorMotion.motionStartMs = millis();
-  doorMotion.targetState = motion == DoorMotion::Opening ? DoorState::Opened : DoorState::Closed;
+  doorMotion.targetState =
+      motion == DoorMotion::Opening ? DoorState::Opened : DoorState::Closed;
   stopAllRelays();
   setRelayState(relayPinForMotion(motion), true);
   logDoorStatusIfChanged(F("motion_start"));
@@ -783,7 +824,8 @@ void initTemperatureSensors() {
   temperatureSensorsInitialized = true;
   if (VERBOSE_LOGS) {
     Serial.printf("SHT31 sensor bus initialized on SDA=%u SCL=%u.\n",
-                  static_cast<unsigned>(sensorSda), static_cast<unsigned>(sensorScl));
+                  static_cast<unsigned>(sensorSda),
+                  static_cast<unsigned>(sensorScl));
   }
 }
 
@@ -829,7 +871,8 @@ bool readSht31Measurement(float &tempC, float &humidityPct) {
   }
   delay(SHT31_MEASUREMENT_DELAY_MS);
   constexpr uint8_t EXPECTED_BYTES = 6;
-  const uint8_t received = greenhouseSensorWire.requestFrom(SHT31_I2C_ADDRESS, EXPECTED_BYTES);
+  const uint8_t received =
+      greenhouseSensorWire.requestFrom(SHT31_I2C_ADDRESS, EXPECTED_BYTES);
   if (received != EXPECTED_BYTES) {
     while (greenhouseSensorWire.available()) {
       greenhouseSensorWire.read();
@@ -840,11 +883,13 @@ bool readSht31Measurement(float &tempC, float &humidityPct) {
   for (uint8_t idx = 0; idx < EXPECTED_BYTES; ++idx) {
     buffer[idx] = greenhouseSensorWire.read();
   }
-  if (computeSht31Crc(buffer) != buffer[2] || computeSht31Crc(buffer + 3) != buffer[5]) {
+  if (computeSht31Crc(buffer) != buffer[2] ||
+      computeSht31Crc(buffer + 3) != buffer[5]) {
     return false;
   }
   const uint16_t rawTemp = (static_cast<uint16_t>(buffer[0]) << 8) | buffer[1];
-  const uint16_t rawHumidity = (static_cast<uint16_t>(buffer[3]) << 8) | buffer[4];
+  const uint16_t rawHumidity =
+      (static_cast<uint16_t>(buffer[3]) << 8) | buffer[4];
   tempC = -45.0f + 175.0f * (static_cast<float>(rawTemp) / 65535.0f);
   float humidity = 100.0f * (static_cast<float>(rawHumidity) / 65535.0f);
   if (humidity < 0.0f) {
@@ -881,10 +926,12 @@ SensorReadings getSensorReadings() {
         }
       }
     } else if (VERBOSE_LOGS) {
-      Serial.println("Failed to read greenhouse sensor data (I2C transaction failed).");
+      Serial.println(
+          "Failed to read greenhouse sensor data (I2C transaction failed).");
     }
   } else if (VERBOSE_LOGS) {
-    Serial.println("SHT31 sensor not initialized; skipping greenhouse readings.");
+    Serial.println(
+        "SHT31 sensor not initialized; skipping greenhouse readings.");
   }
 
   initBatteryAdc();
@@ -893,17 +940,20 @@ SensorReadings getSensorReadings() {
     if (VERBOSE_LOGS) {
       Serial.printf("Battery ADC raw value: %d\n", raw);
     }
-    const float adcVoltage = (static_cast<float>(raw) / 4095.0f) * ADC_REFERENCE_VOLTS;
+    const float adcVoltage =
+        (static_cast<float>(raw) / 4095.0f) * ADC_REFERENCE_VOLTS;
     const float correctedVoltage = adcVoltage / VOLTAGE_DIVIDER_RATIO;
     readings.hasBatteryVoltage = true;
     readings.batteryVoltage = correctedVoltage;
     if (VERBOSE_LOGS) {
-      Serial.printf("Battery voltage: %.2f V (ADC %.2f V before divider correction).\n",
-                    correctedVoltage, adcVoltage);
+      Serial.printf(
+          "Battery voltage: %.2f V (ADC %.2f V before divider correction).\n",
+          correctedVoltage, adcVoltage);
     }
   } else {
     if (VERBOSE_LOGS) {
-      Serial.println("Error reading battery voltage (analogRead returned invalid value).");
+      Serial.println(
+          "Error reading battery voltage (analogRead returned invalid value).");
     }
   }
 
@@ -998,8 +1048,10 @@ bool eraseStoredCredential() {
 void pushDoorHistoryEntry(const DoorHistoryEntry &entry) {
   doorHistoryEntries.push_back(entry);
   if (doorHistoryEntries.size() > DOOR_HISTORY_CSV_BUFFER_LIMIT) {
-    const size_t excess = doorHistoryEntries.size() - DOOR_HISTORY_CSV_BUFFER_LIMIT;
-    doorHistoryEntries.erase(doorHistoryEntries.begin(), doorHistoryEntries.begin() + excess);
+    const size_t excess =
+        doorHistoryEntries.size() - DOOR_HISTORY_CSV_BUFFER_LIMIT;
+    doorHistoryEntries.erase(doorHistoryEntries.begin(),
+                             doorHistoryEntries.begin() + excess);
   }
 }
 
@@ -1020,13 +1072,14 @@ void applyTimezoneOption(const TimezoneOption &option) {
 }
 
 void loadTimezonePreference() {
-  const TimezoneOption *selected = findTimezoneOption(String(DEFAULT_TIMEZONE_ID));
+  const TimezoneOption *selected =
+      findTimezoneOption(String(DEFAULT_TIMEZONE_ID));
   if (selected == nullptr && TIMEZONE_OPTION_COUNT > 0) {
     selected = &TIMEZONE_OPTIONS[0];
   }
   if (initDoorPreferences()) {
-    const String storedId =
-        doorPrefs.getString(PREF_KEY_TIMEZONE_ID, selected ? selected->id : DEFAULT_TIMEZONE_ID);
+    const String storedId = doorPrefs.getString(
+        PREF_KEY_TIMEZONE_ID, selected ? selected->id : DEFAULT_TIMEZONE_ID);
     const TimezoneOption *stored = findTimezoneOption(storedId);
     if (stored != nullptr) {
       selected = stored;
@@ -1039,7 +1092,8 @@ void loadTimezonePreference() {
 
 bool persistTimezonePreference(const String &timezoneId) {
   if (!initDoorPreferences()) {
-    Serial.println("Unable to persist timezone preference (prefs unavailable).");
+    Serial.println(
+        "Unable to persist timezone preference (prefs unavailable).");
     return false;
   }
   doorPrefs.putString(PREF_KEY_TIMEZONE_ID, timezoneId);
@@ -1094,8 +1148,10 @@ bool loadSolarScheduleConfig() {
   loaded.enabled = doc["enabled"] | SOLAR_AUTOMATION_DEFAULT_ENABLED;
   loaded.latitude = doc["latitude"] | DEFAULT_LATITUDE;
   loaded.longitude = doc["longitude"] | DEFAULT_LONGITUDE;
-  loaded.sunriseOffsetMinutes = doc["sunriseOffsetMinutes"] | DEFAULT_SUNRISE_OFFSET_MIN;
-  loaded.sunsetOffsetMinutes = doc["sunsetOffsetMinutes"] | DEFAULT_SUNSET_OFFSET_MIN;
+  loaded.sunriseOffsetMinutes =
+      doc["sunriseOffsetMinutes"] | DEFAULT_SUNRISE_OFFSET_MIN;
+  loaded.sunsetOffsetMinutes =
+      doc["sunsetOffsetMinutes"] | DEFAULT_SUNSET_OFFSET_MIN;
   if (!std::isfinite(loaded.latitude)) {
     loaded.latitude = DEFAULT_LATITUDE;
   }
@@ -1115,9 +1171,11 @@ bool loadSolarScheduleConfig() {
     loaded.sunsetOffsetMinutes = MAX_SUN_OFFSET_MINUTES;
   }
   solarSchedule.config = loaded;
-  Serial.printf("Solar scheduler config loaded: enabled=%s lat=%.4f lon=%.4f sunriseOffset=%d sunsetOffset=%d\n",
-                solarSchedule.config.enabled ? "true" : "false", solarSchedule.config.latitude,
-                solarSchedule.config.longitude, solarSchedule.config.sunriseOffsetMinutes,
+  Serial.printf("Solar scheduler config loaded: enabled=%s lat=%.4f lon=%.4f "
+                "sunriseOffset=%d sunsetOffset=%d\n",
+                solarSchedule.config.enabled ? "true" : "false",
+                solarSchedule.config.latitude, solarSchedule.config.longitude,
+                solarSchedule.config.sunriseOffsetMinutes,
                 solarSchedule.config.sunsetOffsetMinutes);
   return true;
 }
@@ -1153,8 +1211,10 @@ void loadSolarScheduleExecutionState() {
   }
   lastSunriseCommandDay = doorPrefs.getUShort(PREF_KEY_SCHED_OPEN_DAY, 0);
   lastSunsetCommandDay = doorPrefs.getUShort(PREF_KEY_SCHED_CLOSE_DAY, 0);
-  lastSunriseCommandTs = static_cast<time_t>(doorPrefs.getULong(PREF_KEY_SCHED_OPEN_TS, 0));
-  lastSunsetCommandTs = static_cast<time_t>(doorPrefs.getULong(PREF_KEY_SCHED_CLOSE_TS, 0));
+  lastSunriseCommandTs =
+      static_cast<time_t>(doorPrefs.getULong(PREF_KEY_SCHED_OPEN_TS, 0));
+  lastSunsetCommandTs =
+      static_cast<time_t>(doorPrefs.getULong(PREF_KEY_SCHED_CLOSE_TS, 0));
 }
 
 void persistSolarExecutionState() {
@@ -1163,8 +1223,10 @@ void persistSolarExecutionState() {
   }
   doorPrefs.putUShort(PREF_KEY_SCHED_OPEN_DAY, lastSunriseCommandDay);
   doorPrefs.putUShort(PREF_KEY_SCHED_CLOSE_DAY, lastSunsetCommandDay);
-  doorPrefs.putULong(PREF_KEY_SCHED_OPEN_TS, static_cast<uint32_t>(lastSunriseCommandTs));
-  doorPrefs.putULong(PREF_KEY_SCHED_CLOSE_TS, static_cast<uint32_t>(lastSunsetCommandTs));
+  doorPrefs.putULong(PREF_KEY_SCHED_OPEN_TS,
+                     static_cast<uint32_t>(lastSunriseCommandTs));
+  doorPrefs.putULong(PREF_KEY_SCHED_CLOSE_TS,
+                     static_cast<uint32_t>(lastSunsetCommandTs));
 }
 
 void loadManualOverrideState() {
@@ -1173,7 +1235,8 @@ void loadManualOverrideState() {
     manualOverride.expiresUtc = 0;
     return;
   }
-  manualOverride.expiresUtc = static_cast<time_t>(doorPrefs.getULong(PREF_KEY_OVERRIDE_UNTIL, 0));
+  manualOverride.expiresUtc =
+      static_cast<time_t>(doorPrefs.getULong(PREF_KEY_OVERRIDE_UNTIL, 0));
   manualOverride.active = manualOverride.expiresUtc > 0;
 }
 
@@ -1181,7 +1244,8 @@ void persistManualOverrideState() {
   if (!initDoorPreferences()) {
     return;
   }
-  doorPrefs.putULong(PREF_KEY_OVERRIDE_UNTIL, static_cast<uint32_t>(manualOverride.expiresUtc));
+  doorPrefs.putULong(PREF_KEY_OVERRIDE_UNTIL,
+                     static_cast<uint32_t>(manualOverride.expiresUtc));
 }
 
 bool manualOverrideActive(time_t nowTs) {
@@ -1208,9 +1272,7 @@ bool manualOverrideActive(time_t nowTs) {
   return true;
 }
 
-void updateManualOverride(time_t nowTs) {
-  manualOverrideActive(nowTs);
-}
+void updateManualOverride(time_t nowTs) { manualOverrideActive(nowTs); }
 
 void beginManualOverride() {
   if (!solarSchedule.config.enabled) {
@@ -1223,7 +1285,8 @@ void beginManualOverride() {
   manualOverride.active = true;
   manualOverride.expiresUtc = nowTs + MANUAL_OVERRIDE_DURATION_SECONDS;
   persistManualOverrideState();
-  Serial.printf("Manual override enabled until %lld.\n", static_cast<long long>(manualOverride.expiresUtc));
+  Serial.printf("Manual override enabled until %lld.\n",
+                static_cast<long long>(manualOverride.expiresUtc));
 }
 
 uint16_t localDayOfYear(time_t ts) {
@@ -1237,7 +1300,8 @@ uint16_t localDayOfYear(time_t ts) {
   return static_cast<uint16_t>(localTm.tm_yday + 1);
 }
 
-bool computeSolarEventUtc(bool sunrise, time_t referenceUtc, const SolarScheduleConfig &config,
+bool computeSolarEventUtc(bool sunrise, time_t referenceUtc,
+                          const SolarScheduleConfig &config,
                           time_t &eventUtcOut) {
   if (referenceUtc <= 0) {
     return false;
@@ -1251,7 +1315,8 @@ bool computeSolarEventUtc(bool sunrise, time_t referenceUtc, const SolarSchedule
   const double t = sunrise ? (dayOfYear + ((6.0 - longitudeHour) / 24.0))
                            : (dayOfYear + ((18.0 - longitudeHour) / 24.0));
   double M = (0.9856 * t) - 3.289;
-  double L = M + (1.916 * std::sin(DEG_TO_RAD_D * M)) + (0.020 * std::sin(2.0 * DEG_TO_RAD_D * M)) + 282.634;
+  double L = M + (1.916 * std::sin(DEG_TO_RAD_D * M)) +
+             (0.020 * std::sin(2.0 * DEG_TO_RAD_D * M)) + 282.634;
   L = std::fmod(L, 360.0);
   if (L < 0) {
     L += 360.0;
@@ -1267,13 +1332,14 @@ bool computeSolarEventUtc(bool sunrise, time_t referenceUtc, const SolarSchedule
   RA /= 15.0;
   const double sinDec = 0.39782 * std::sin(DEG_TO_RAD_D * L);
   const double cosDec = std::cos(std::asin(sinDec));
-  const double cosH =
-      (std::cos(DEG_TO_RAD_D * SOLAR_ZENITH) - (sinDec * std::sin(DEG_TO_RAD_D * config.latitude))) /
-      (cosDec * std::cos(DEG_TO_RAD_D * config.latitude));
+  const double cosH = (std::cos(DEG_TO_RAD_D * SOLAR_ZENITH) -
+                       (sinDec * std::sin(DEG_TO_RAD_D * config.latitude))) /
+                      (cosDec * std::cos(DEG_TO_RAD_D * config.latitude));
   if (cosH > 1.0 || cosH < -1.0) {
     return false;
   }
-  double H = sunrise ? (360.0 - RAD_TO_DEG_D * std::acos(cosH)) : (RAD_TO_DEG_D * std::acos(cosH));
+  double H = sunrise ? (360.0 - RAD_TO_DEG_D * std::acos(cosH))
+                     : (RAD_TO_DEG_D * std::acos(cosH));
   H /= 15.0;
   const double T = H + RA - (0.06571 * t) - 6.622;
   double UT = T - longitudeHour;
@@ -1283,7 +1349,8 @@ bool computeSolarEventUtc(bool sunrise, time_t referenceUtc, const SolarSchedule
   while (UT >= 24.0) {
     UT -= 24.0;
   }
-  const double timezoneHours = static_cast<double>(activeTimezoneOffsetMinutes) / 60.0;
+  const double timezoneHours =
+      static_cast<double>(activeTimezoneOffsetMinutes) / 60.0;
   double localHours = UT + timezoneHours;
   int dayAdjustment = 0;
   while (localHours < 0.0) {
@@ -1316,7 +1383,8 @@ bool ensureSolarScheduleTimes(time_t nowUtc) {
   if (day == 0) {
     return false;
   }
-  if (solarSchedule.dirty || !solarSchedule.timesValid || solarSchedule.computedDay != day) {
+  if (solarSchedule.dirty || !solarSchedule.timesValid ||
+      solarSchedule.computedDay != day) {
     time_t sunriseUtc = 0;
     time_t sunsetUtc = 0;
     if (!computeSolarEventUtc(true, nowUtc, solarSchedule.config, sunriseUtc) ||
@@ -1336,7 +1404,8 @@ bool ensureSolarScheduleTimes(time_t nowUtc) {
     solarSchedule.computedDay = day;
     solarSchedule.timesValid = true;
     solarSchedule.dirty = false;
-    Serial.printf("Solar scheduler recalculated for day %u (sunrise action=%lld, sunset action=%lld)\n",
+    Serial.printf("Solar scheduler recalculated for day %u (sunrise "
+                  "action=%lld, sunset action=%lld)\n",
                   static_cast<unsigned>(day),
                   static_cast<long long>(solarSchedule.sunriseActionUtc),
                   static_cast<long long>(solarSchedule.sunsetActionUtc));
@@ -1366,8 +1435,10 @@ void updateSolarScheduler() {
     return;
   }
   auto triggerAction = [&](bool sunrise) {
-    time_t targetTs = sunrise ? solarSchedule.sunriseActionUtc : solarSchedule.sunsetActionUtc;
-    uint16_t *lastDay = sunrise ? &lastSunriseCommandDay : &lastSunsetCommandDay;
+    time_t targetTs = sunrise ? solarSchedule.sunriseActionUtc
+                              : solarSchedule.sunsetActionUtc;
+    uint16_t *lastDay =
+        sunrise ? &lastSunriseCommandDay : &lastSunsetCommandDay;
     time_t *lastTs = sunrise ? &lastSunriseCommandTs : &lastSunsetCommandTs;
     const char *label = sunrise ? "open" : "close";
     if (targetTs == 0 || nowTs < targetTs) {
@@ -1377,13 +1448,16 @@ void updateSolarScheduler() {
       return;
     }
     DoorCommandResult result = sunrise ? openDoor() : closeDoor();
-    if (result == DoorCommandResult::Accepted || result == DoorCommandResult::AlreadyAtTarget) {
+    if (result == DoorCommandResult::Accepted ||
+        result == DoorCommandResult::AlreadyAtTarget) {
       *lastDay = today;
       *lastTs = nowTs;
       persistSolarExecutionState();
-      Serial.printf("Solar scheduler %s action result=%s\n", label, doorCommandResultToString(result));
+      Serial.printf("Solar scheduler %s action result=%s\n", label,
+                    doorCommandResultToString(result));
       if (result == DoorCommandResult::AlreadyAtTarget) {
-        recordDoorHistory(sunrise ? "scheduler_open_skip" : "scheduler_close_skip");
+        recordDoorHistory(sunrise ? "scheduler_open_skip"
+                                  : "scheduler_close_skip");
       }
     }
   };
@@ -1395,12 +1469,14 @@ String formatHistoryTimestamp(time_t ts) {
   if (ts <= 0) {
     return String(F("1970-01-01 00:00:00"));
   }
-  const long offsetSeconds = static_cast<long>(activeTimezoneOffsetMinutes) * 60L;
+  const long offsetSeconds =
+      static_cast<long>(activeTimezoneOffsetMinutes) * 60L;
   time_t adjusted = ts + offsetSeconds;
   struct tm timeinfo;
   gmtime_r(&adjusted, &timeinfo);
   char buffer[32];
-  size_t written = std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  size_t written =
+      std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
   if (written == 0) {
     return String(F("1970-01-01 00:00:00"));
   }
@@ -1437,7 +1513,8 @@ String formatDoorHistoryCsvLine(const DoorHistoryEntry &entry) {
   return line;
 }
 
-bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut, bool legacyFormat) {
+bool parseDoorHistoryCsvLine(const String &line, DoorHistoryEntry &entryOut,
+                             bool legacyFormat) {
   String trimmed = line;
   trimmed.trim();
   if (!trimmed.length()) {
@@ -1502,7 +1579,8 @@ void loadDoorHistoryFromDisk() {
     if (parseDoorHistoryCsvLine(line, entry, legacyFormat)) {
       pushDoorHistoryEntry(entry);
       if (entry.timestamp > 0 && entry.event == "hourly") {
-        lastHourlyBucket = entry.timestamp - (entry.timestamp % DOOR_HISTORY_HOURLY_SECONDS);
+        lastHourlyBucket =
+            entry.timestamp - (entry.timestamp % DOOR_HISTORY_HOURLY_SECONDS);
       }
     }
   }
@@ -1520,7 +1598,8 @@ bool rewriteDoorHistoryCsvDisplayTimes() {
   }
   File output = LittleFS.open(DOOR_HISTORY_CSV_TEMP_PATH, "w");
   if (!output) {
-    Serial.println("Unable to open temporary history.csv for timezone rewrite.");
+    Serial.println(
+        "Unable to open temporary history.csv for timezone rewrite.");
     input.close();
     return false;
   }
@@ -1542,8 +1621,10 @@ bool rewriteDoorHistoryCsvDisplayTimes() {
   }
   input.close();
   output.close();
-  if (LittleFS.exists(DOOR_HISTORY_CSV_PATH) && !LittleFS.remove(DOOR_HISTORY_CSV_PATH)) {
-    Serial.println("Failed to remove original history.csv during timezone rewrite.");
+  if (LittleFS.exists(DOOR_HISTORY_CSV_PATH) &&
+      !LittleFS.remove(DOOR_HISTORY_CSV_PATH)) {
+    Serial.println(
+        "Failed to remove original history.csv during timezone rewrite.");
     LittleFS.remove(DOOR_HISTORY_CSV_TEMP_PATH);
     return false;
   }
@@ -1562,15 +1643,16 @@ void ensureHistoryDisplayTimesCurrent() {
   if (!initDoorPreferences()) {
     return;
   }
-  const String renderedId =
-      doorPrefs.getString(PREF_KEY_TIMEZONE_RENDER_ID, activeTimezoneId.c_str());
+  const String renderedId = doorPrefs.getString(PREF_KEY_TIMEZONE_RENDER_ID,
+                                                activeTimezoneId.c_str());
   if (renderedId == activeTimezoneId) {
     return;
   }
   if (rewriteDoorHistoryCsvDisplayTimes()) {
     Serial.println("Door history CSV display times updated for new timezone.");
   } else {
-    Serial.println("Door history CSV timezone update failed; retaining previous timestamps.");
+    Serial.println("Door history CSV timezone update failed; retaining "
+                   "previous timestamps.");
   }
 }
 
@@ -1745,7 +1827,8 @@ bool serveEmbeddedAsset(WebServer &server, const String &requestPath) {
   server.sendHeader(F("Cache-Control"),
                     isIndex ? F("no-cache, no-store, must-revalidate")
                             : F("public, max-age=2592000, immutable"));
-  server.send_P(200, asset->contentType, reinterpret_cast<const char *>(asset->data), asset->size);
+  server.send_P(200, asset->contentType,
+                reinterpret_cast<const char *>(asset->data), asset->size);
   return true;
 }
 
@@ -1765,29 +1848,29 @@ String escapeJson(const String &value) {
   for (size_t idx = 0; idx < static_cast<size_t>(value.length()); ++idx) {
     const char ch = value.charAt(idx);
     switch (ch) {
-      case '"':
-      case '\\':
-        escaped += '\\';
-        escaped += ch;
-        break;
-      case '\b':
-        escaped += F("\\b");
-        break;
-      case '\f':
-        escaped += F("\\f");
-        break;
-      case '\n':
-        escaped += F("\\n");
-        break;
-      case '\r':
-        escaped += F("\\r");
-        break;
-      case '\t':
-        escaped += F("\\t");
-        break;
-      default:
-        escaped += ch;
-        break;
+    case '"':
+    case '\\':
+      escaped += '\\';
+      escaped += ch;
+      break;
+    case '\b':
+      escaped += F("\\b");
+      break;
+    case '\f':
+      escaped += F("\\f");
+      break;
+    case '\n':
+      escaped += F("\\n");
+      break;
+    case '\r':
+      escaped += F("\\r");
+      break;
+    case '\t':
+      escaped += F("\\t");
+      break;
+    default:
+      escaped += ch;
+      break;
     }
   }
   return escaped;
@@ -1797,11 +1880,15 @@ String sensorReadingsToJson(const SensorReadings &readings) {
   String json;
   json.reserve(192);
   json += F("{\"greenhouseTempC\":");
-  json += readings.hasGreenhouseTemp ? String(readings.greenhouseTempC, 2) : F("null");
+  json += readings.hasGreenhouseTemp ? String(readings.greenhouseTempC, 2)
+                                     : F("null");
   json += F(",\"greenhouseHumidityPct\":");
-  json += readings.hasGreenhouseHumidity ? String(readings.greenhouseHumidityPct, 2) : F("null");
+  json += readings.hasGreenhouseHumidity
+              ? String(readings.greenhouseHumidityPct, 2)
+              : F("null");
   json += F(",\"batteryVoltage\":");
-  json += readings.hasBatteryVoltage ? String(readings.batteryVoltage, 2) : F("null");
+  json += readings.hasBatteryVoltage ? String(readings.batteryVoltage, 2)
+                                     : F("null");
   json += F("}");
   return json;
 }
@@ -1878,12 +1965,15 @@ String solarSchedulerStatusToJson(bool includeDeviceMeta) {
   const uint16_t today = nowTs > 0 ? localDayOfYear(nowTs) : 0;
   const bool sunriseDone = today != 0 && today == lastSunriseCommandDay;
   const bool sunsetDone = today != 0 && today == lastSunsetCommandDay;
-  const bool sunriseUpcoming = timesValid && !sunriseDone && solarSchedule.sunriseActionUtc >= nowTs;
-  const bool sunsetUpcoming = timesValid && !sunsetDone && solarSchedule.sunsetActionUtc >= nowTs;
+  const bool sunriseUpcoming =
+      timesValid && !sunriseDone && solarSchedule.sunriseActionUtc >= nowTs;
+  const bool sunsetUpcoming =
+      timesValid && !sunsetDone && solarSchedule.sunsetActionUtc >= nowTs;
   const char *nextAction = nullptr;
   time_t nextActionTs = 0;
   if (sunriseUpcoming &&
-      (!sunsetUpcoming || solarSchedule.sunriseActionUtc <= solarSchedule.sunsetActionUtc)) {
+      (!sunsetUpcoming ||
+       solarSchedule.sunriseActionUtc <= solarSchedule.sunsetActionUtc)) {
     nextAction = "open";
     nextActionTs = solarSchedule.sunriseActionUtc;
   } else if (sunsetUpcoming) {
@@ -1980,7 +2070,8 @@ String solarSchedulerStatusToJson(bool includeDeviceMeta) {
 
 void sendCorsHeaders() {
   apiServer.sendHeader(F("Access-Control-Allow-Origin"), F("*"));
-  apiServer.sendHeader(F("Access-Control-Allow-Methods"), F("GET,POST,OPTIONS"));
+  apiServer.sendHeader(F("Access-Control-Allow-Methods"),
+                       F("GET,POST,OPTIONS"));
   apiServer.sendHeader(F("Access-Control-Allow-Headers"), F("Content-Type"));
 }
 
@@ -1995,10 +2086,11 @@ void handleOptions() {
 }
 
 void handleApiRoot() {
-  String json =
-      F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/status\",\"/api/door\",\"/api/door/open\","
-        "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/api/timezone\",\"/api/schedule\","
-        "\"/api/ota\",\"/api/ota/upload\",\"/history.csv\"]}");
+  String json = F("{\"service\":\"coop-door\",\"endpoints\":[\"/api/"
+                  "status\",\"/api/door\",\"/api/door/open\","
+                  "\"/api/door/close\",\"/api/sensors\",\"/api/history\",\"/"
+                  "api/timezone\",\"/api/schedule\","
+                  "\"/api/ota\",\"/api/ota/upload\",\"/history.csv\"]}");
   sendJsonResponse(200, json);
 }
 
@@ -2013,7 +2105,8 @@ void handleSensorsEndpoint() {
 
 void handleDoorHistoryEndpoint() {
   const size_t total = doorHistoryEntries.size();
-  const size_t limit = total > DOOR_HISTORY_DISPLAY_LIMIT ? DOOR_HISTORY_DISPLAY_LIMIT : total;
+  const size_t limit =
+      total > DOOR_HISTORY_DISPLAY_LIMIT ? DOOR_HISTORY_DISPLAY_LIMIT : total;
   if (limit == 0) {
     sendJsonResponse(200, F("[]"));
     return;
@@ -2031,11 +2124,14 @@ void handleDoorHistoryEndpoint() {
     json += F(",\"doorState\":\"");
     json += doorStateToString(entry.doorState);
     json += F("\",\"greenhouseTempC\":");
-    json += entry.hasGreenhouseTemp ? String(entry.greenhouseTempC, 2) : F("null");
+    json +=
+        entry.hasGreenhouseTemp ? String(entry.greenhouseTempC, 2) : F("null");
     json += F(",\"greenhouseHumidityPct\":");
-    json += entry.hasGreenhouseHumidity ? String(entry.greenhouseHumidityPct, 2) : F("null");
+    json += entry.hasGreenhouseHumidity ? String(entry.greenhouseHumidityPct, 2)
+                                        : F("null");
     json += F(",\"batteryVoltage\":");
-    json += entry.hasBatteryVoltage ? String(entry.batteryVoltage, 2) : F("null");
+    json +=
+        entry.hasBatteryVoltage ? String(entry.batteryVoltage, 2) : F("null");
     json += F(",\"event\":\"");
     json += escapeJson(entry.event);
     json += F("\",\"displayTime\":\"");
@@ -2064,7 +2160,8 @@ void handleDoorHistoryCsv() {
   file.close();
 }
 
-String doorCommandResponseToJson(const __FlashStringHelper *actionLabel, DoorCommandResult result) {
+String doorCommandResponseToJson(const __FlashStringHelper *actionLabel,
+                                 DoorCommandResult result) {
   const DoorState state = getDoorPosition();
   String json;
   json.reserve(256);
@@ -2133,7 +2230,8 @@ void handleOtaUploadRequest() {
     ESP.restart();
     return;
   }
-  if (otaUpdateState.lastResult == OtaResult::Error && otaUpdateState.lastError.length() > 0) {
+  if (otaUpdateState.lastResult == OtaResult::Error &&
+      otaUpdateState.lastError.length() > 0) {
     String json;
     json.reserve(160);
     json += F("{\"status\":\"error\",\"error\":\"");
@@ -2160,57 +2258,59 @@ String buildUpdateErrorMessage(const __FlashStringHelper *prefix) {
 void handleOtaUploadStream() {
   HTTPUpload &upload = apiServer.upload();
   switch (upload.status) {
-    case UPLOAD_FILE_START: {
-      Serial.printf("OTA upload started: %s (expected %u bytes).\n", upload.filename.c_str(),
-                    static_cast<unsigned>(upload.totalSize));
-      beginOtaTracking(upload.filename, upload.totalSize);
-      const size_t expected = upload.totalSize > 0 ? upload.totalSize : UPDATE_SIZE_UNKNOWN;
-      if (!Update.begin(expected)) {
-        Serial.println(F("OTA begin failed."));
-        Update.printError(Serial);
-        failOtaUpdate(buildUpdateErrorMessage(F("Unable to prepare OTA")));
-      }
-      break;
+  case UPLOAD_FILE_START: {
+    Serial.printf("OTA upload started: %s (expected %u bytes).\n",
+                  upload.filename.c_str(),
+                  static_cast<unsigned>(upload.totalSize));
+    beginOtaTracking(upload.filename, upload.totalSize);
+    const size_t expected =
+        upload.totalSize > 0 ? upload.totalSize : UPDATE_SIZE_UNKNOWN;
+    if (!Update.begin(expected)) {
+      Serial.println(F("OTA begin failed."));
+      Update.printError(Serial);
+      failOtaUpdate(buildUpdateErrorMessage(F("Unable to prepare OTA")));
     }
-    case UPLOAD_FILE_WRITE: {
-      if (!otaUpdateState.active) {
-        return;
-      }
-      const size_t chunkSize = upload.currentSize;
-      const size_t written = Update.write(upload.buf, chunkSize);
-      if (written != chunkSize) {
-        Serial.println(F("OTA write failed."));
-        Update.printError(Serial);
-        failOtaUpdate(buildUpdateErrorMessage(F("Write failed")));
-        return;
-      }
-      otaUpdateState.receivedBytes += written;
-      if (upload.totalSize > 0) {
-        otaUpdateState.totalBytes = upload.totalSize;
-      }
-      break;
+    break;
+  }
+  case UPLOAD_FILE_WRITE: {
+    if (!otaUpdateState.active) {
+      return;
     }
-    case UPLOAD_FILE_END: {
-      if (!otaUpdateState.active) {
-        return;
-      }
-      if (!Update.end(true)) {
-        Serial.println(F("OTA finalize failed."));
-        Update.printError(Serial);
-        failOtaUpdate(buildUpdateErrorMessage(F("Finalize failed")));
-        return;
-      }
-      Serial.println(F("OTA update complete; reboot pending."));
-      completeOtaSuccess(upload.totalSize);
-      break;
+    const size_t chunkSize = upload.currentSize;
+    const size_t written = Update.write(upload.buf, chunkSize);
+    if (written != chunkSize) {
+      Serial.println(F("OTA write failed."));
+      Update.printError(Serial);
+      failOtaUpdate(buildUpdateErrorMessage(F("Write failed")));
+      return;
     }
-    case UPLOAD_FILE_ABORTED: {
-      Serial.println(F("OTA upload aborted by client."));
-      failOtaUpdate(String(F("Upload aborted")));
-      break;
+    otaUpdateState.receivedBytes += written;
+    if (upload.totalSize > 0) {
+      otaUpdateState.totalBytes = upload.totalSize;
     }
-    default:
-      break;
+    break;
+  }
+  case UPLOAD_FILE_END: {
+    if (!otaUpdateState.active) {
+      return;
+    }
+    if (!Update.end(true)) {
+      Serial.println(F("OTA finalize failed."));
+      Update.printError(Serial);
+      failOtaUpdate(buildUpdateErrorMessage(F("Finalize failed")));
+      return;
+    }
+    Serial.println(F("OTA update complete; reboot pending."));
+    completeOtaSuccess(upload.totalSize);
+    break;
+  }
+  case UPLOAD_FILE_ABORTED: {
+    Serial.println(F("OTA upload aborted by client."));
+    failOtaUpdate(String(F("Upload aborted")));
+    break;
+  }
+  default:
+    break;
   }
 }
 
@@ -2495,7 +2595,6 @@ void handleSolarScheduleUpdate() {
   sendJsonResponse(200, solarSchedulerStatusToJson(true));
 }
 
-
 void announceConfigPortalStatus(bool force) {
   if (!configPortalActive) {
     return;
@@ -2522,30 +2621,35 @@ void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     return;
   }
   switch (event) {
-    case ARDUINO_EVENT_WIFI_AP_STACONNECTED: {
-      const wifi_event_ap_staconnected_t &connected = info.wifi_ap_staconnected;
-      Serial.printf("Wi-Fi client %02X:%02X:%02X:%02X:%02X:%02X joined config AP (AID %u).\n",
-                    connected.mac[0], connected.mac[1], connected.mac[2], connected.mac[3],
-                    connected.mac[4], connected.mac[5], connected.aid);
-      announceConfigPortalStatus(true);
-      break;
-    }
-    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: {
-      const wifi_event_ap_stadisconnected_t &disconnected = info.wifi_ap_stadisconnected;
-      Serial.printf(
-          "Wi-Fi client %02X:%02X:%02X:%02X:%02X:%02X left config AP (AID %u).\n",
-          disconnected.mac[0], disconnected.mac[1], disconnected.mac[2], disconnected.mac[3],
-          disconnected.mac[4], disconnected.mac[5], disconnected.aid);
-      break;
-    }
-    default:
-      break;
+  case ARDUINO_EVENT_WIFI_AP_STACONNECTED: {
+    const wifi_event_ap_staconnected_t &connected = info.wifi_ap_staconnected;
+    Serial.printf("Wi-Fi client %02X:%02X:%02X:%02X:%02X:%02X joined config AP "
+                  "(AID %u).\n",
+                  connected.mac[0], connected.mac[1], connected.mac[2],
+                  connected.mac[3], connected.mac[4], connected.mac[5],
+                  connected.aid);
+    announceConfigPortalStatus(true);
+    break;
+  }
+  case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: {
+    const wifi_event_ap_stadisconnected_t &disconnected =
+        info.wifi_ap_stadisconnected;
+    Serial.printf(
+        "Wi-Fi client %02X:%02X:%02X:%02X:%02X:%02X left config AP (AID %u).\n",
+        disconnected.mac[0], disconnected.mac[1], disconnected.mac[2],
+        disconnected.mac[3], disconnected.mac[4], disconnected.mac[5],
+        disconnected.aid);
+    break;
+  }
+  default:
+    break;
   }
 }
 
 void startCaptiveDns(const IPAddress &apIp) {
   stopCaptiveDns();
-  configPortalDnsActive = configPortalDns.start(CAPTIVE_PORTAL_DNS_PORT, "*", apIp);
+  configPortalDnsActive =
+      configPortalDns.start(CAPTIVE_PORTAL_DNS_PORT, "*", apIp);
   if (!configPortalDnsActive) {
     Serial.println("Failed to start captive portal DNS server.");
   }
@@ -2596,10 +2700,12 @@ bool handleCaptivePortalRedirect() {
   }
   const String redirectTarget = String(F("http://")) + apIp.toString() + F("/");
   apiServer.sendHeader(F("Location"), redirectTarget, true);
-  apiServer.sendHeader(F("Cache-Control"), F("no-cache, no-store, must-revalidate"));
+  apiServer.sendHeader(F("Cache-Control"),
+                       F("no-cache, no-store, must-revalidate"));
   apiServer.sendHeader(F("Pragma"), F("no-cache"));
   apiServer.sendHeader(F("Expires"), F("0"));
-  apiServer.send(302, F("text/plain"), F("Redirecting to configuration portal..."));
+  apiServer.send(302, F("text/plain"),
+                 F("Redirecting to configuration portal..."));
   return true;
 }
 
@@ -2618,6 +2724,13 @@ void startConfigPortal() {
   }
   WiFi.softAPConfig(CONFIG_PORTAL_IP, CONFIG_PORTAL_IP, CONFIG_PORTAL_NETMASK);
   startCaptiveDns(CONFIG_PORTAL_IP);
+
+  // Start mDNS in AP mode for easy access via coop2.local
+  if (MDNS.begin("coop2")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS active in AP mode: http://coop2.local");
+  }
+
   announceConfigPortalStatus(true);
 }
 
@@ -2651,7 +2764,8 @@ void startApiServer() {
   apiServer.on("/api/ota", HTTP_OPTIONS, handleOptions);
   apiServer.on("/api/ota", HTTP_GET, handleOtaStatus);
   apiServer.on("/api/ota/upload", HTTP_OPTIONS, handleOptions);
-  apiServer.on("/api/ota/upload", HTTP_POST, handleOtaUploadRequest, handleOtaUploadStream);
+  apiServer.on("/api/ota/upload", HTTP_POST, handleOtaUploadRequest,
+               handleOtaUploadStream);
   apiServer.on("/history.csv", HTTP_GET, handleDoorHistoryCsv);
   apiServer.onNotFound(handleNotFound);
   apiServer.begin();
@@ -2668,7 +2782,8 @@ void setup() {
   Serial.begin(115200);
   const bool serialReady = waitForSerial(SERIAL_WAIT_TIMEOUT_MS);
   if (!serialReady) {
-    Serial.println(F("Serial console not detected within timeout; continuing headless."));
+    Serial.println(
+        F("Serial console not detected within timeout; continuing headless."));
   } else {
     updateSerialAttachmentAnnounce();
   }
@@ -2686,9 +2801,11 @@ void setup() {
   initWifiPreferences();
   if (!retainWifiCredentialsAfterReboot) {
     if (eraseStoredCredential()) {
-      Serial.println("Stored Wi-Fi credentials cleared (retain setting disabled).");
+      Serial.println(
+          "Stored Wi-Fi credentials cleared (retain setting disabled).");
     } else {
-      Serial.println("Requested Wi-Fi credential wipe failed; continuing with stored config.");
+      Serial.println("Requested Wi-Fi credential wipe failed; continuing with "
+                     "stored config.");
     }
   }
   loadDoorHistoryFromDisk();
@@ -2722,7 +2839,8 @@ void loop() {
   // Heartbeat: emit a short line every second when a serial console is attached
   static uint32_t lastHeartbeatMs = 0;
   const uint32_t nowMs = millis();
-  if (SERIAL_HEARTBEAT_ENABLED && serialConsoleAttached && nowMs - lastHeartbeatMs >= 1000) {
+  if (SERIAL_HEARTBEAT_ENABLED && serialConsoleAttached &&
+      nowMs - lastHeartbeatMs >= 1000) {
     Serial.println(F("[hb] alive"));
     lastHeartbeatMs = nowMs;
   }
@@ -2730,7 +2848,8 @@ void loop() {
     apiServer.handleClient();
   }
   serviceCaptiveDns();
-  if (otaUpdateState.rebootPending && !otaUpdateState.active && otaUpdateState.completedMs > 0) {
+  if (otaUpdateState.rebootPending && !otaUpdateState.active &&
+      otaUpdateState.completedMs > 0) {
     const uint32_t elapsed = millis() - otaUpdateState.completedMs;
     if (elapsed >= OTA_REBOOT_GRACE_MS) {
       Serial.println(F("OTA grace period elapsed; restarting now."));
@@ -2763,7 +2882,8 @@ bool checkInternet() {
   return true;
 }
 
-size_t collectConfiguredNetworks(NetworkCandidate *candidates, size_t maxCandidates) {
+size_t collectConfiguredNetworks(NetworkCandidate *candidates,
+                                 size_t maxCandidates) {
   if (VERBOSE_LOGS) {
     Serial.println("Scanning for Wi-Fi networks...");
   }
@@ -2779,7 +2899,8 @@ size_t collectConfiguredNetworks(NetworkCandidate *candidates, size_t maxCandida
   for (int16_t i = 0; i < found && count < maxCandidates; ++i) {
     const String ssid = WiFi.SSID(i);
     const int32_t rssi = WiFi.RSSI(i);
-    for (size_t credIdx = 0; credIdx < WIFI_NETWORK_COUNT && count < maxCandidates; ++credIdx) {
+    for (size_t credIdx = 0;
+         credIdx < WIFI_NETWORK_COUNT && count < maxCandidates; ++credIdx) {
       if (ssid == WIFI_NETWORKS[credIdx].ssid) {
         candidates[count].credential = &WIFI_NETWORKS[credIdx];
         candidates[count].rssi = rssi;
@@ -2831,7 +2952,8 @@ bool attemptWifiConnection(const char *ssid, const char *password) {
     WiFi.begin(ssid);
   }
   bool connected = false;
-  for (uint8_t waitCycle = 0; waitCycle < STATUS_CHECK_ITERATIONS; ++waitCycle) {
+  for (uint8_t waitCycle = 0; waitCycle < STATUS_CHECK_ITERATIONS;
+       ++waitCycle) {
     if (WiFi.status() == WL_CONNECTED) {
       connected = true;
       break;
@@ -2844,11 +2966,14 @@ bool attemptWifiConnection(const char *ssid, const char *password) {
     delay(500);
     return false;
   }
+  // Internet check is now advisory only (some routers block outbound pings)
   if (!checkInternet()) {
-    Serial.println("Connected but controller could not reach the internet.");
-    WiFi.disconnect(true);
-    delay(500);
-    return false;
+    Serial.println(
+        "Warning: Connected to Wi-Fi but could not reach the internet.");
+    Serial.println(
+        "         (This may be normal if your router blocks outbound pings.)");
+    // Don't disconnect - the device is on the network and can still serve the
+    // webapp
   }
   return true;
 }
@@ -2859,14 +2984,16 @@ bool connectToWifi() {
   WiFi.disconnect(true);
   delay(100);
 
-  const esp_err_t txPowerResult = esp_wifi_set_max_tx_power(8 * 4);  // API expects quarter-dBm units
+  const esp_err_t txPowerResult =
+      esp_wifi_set_max_tx_power(8 * 4); // API expects quarter-dBm units
   if (txPowerResult == ESP_OK) {
     if (VERBOSE_LOGS) {
       Serial.println("Wi-Fi TX power set to ~8 dBm.");
     }
   } else {
     if (VERBOSE_LOGS) {
-      Serial.printf("Failed to set Wi-Fi TX power (error %d).\n", static_cast<int>(txPowerResult));
+      Serial.printf("Failed to set Wi-Fi TX power (error %d).\n",
+                    static_cast<int>(txPowerResult));
     }
   }
 
@@ -2874,8 +3001,10 @@ bool connectToWifi() {
   if (retainWifiCredentialsAfterReboot) {
     StoredCredential stored;
     if (loadStoredCredential(stored)) {
-      Serial.printf("Attempting stored Wi-Fi credential for SSID '%s'.\n", stored.ssid.c_str());
-      connected = attemptWifiConnection(stored.ssid.c_str(), stored.password.c_str());
+      Serial.printf("Attempting stored Wi-Fi credential for SSID '%s'.\n",
+                    stored.ssid.c_str());
+      connected =
+          attemptWifiConnection(stored.ssid.c_str(), stored.password.c_str());
       if (!connected) {
         Serial.println("Stored credential failed.");
       }
@@ -2887,16 +3016,19 @@ bool connectToWifi() {
   }
 
   NetworkCandidate candidates[WIFI_NETWORK_COUNT] = {};
-  const size_t candidateCount = collectConfiguredNetworks(candidates, WIFI_NETWORK_COUNT);
+  const size_t candidateCount =
+      collectConfiguredNetworks(candidates, WIFI_NETWORK_COUNT);
   if (!connected && !TEST_MODE) {
     if (candidateCount == 0) {
       Serial.println("No known Wi-Fi networks found.");
     } else {
       sortCandidates(candidates, candidateCount);
-      for (uint8_t attempt = 0; attempt < MAX_RETRIES && !connected; ++attempt) {
+      for (uint8_t attempt = 0; attempt < MAX_RETRIES && !connected;
+           ++attempt) {
         for (size_t idx = 0; idx < candidateCount && !connected; ++idx) {
           const NetworkCandidate &candidate = candidates[idx];
-          if (attemptWifiConnection(candidate.credential->ssid, candidate.credential->password)) {
+          if (attemptWifiConnection(candidate.credential->ssid,
+                                    candidate.credential->password)) {
             connected = true;
             break;
           }
@@ -2926,14 +3058,25 @@ bool connectToWifi() {
   WiFi.setHostname(hostname);
   const String ipStr = WiFi.localIP().toString();
   const String macStr = WiFi.macAddress();
-  Serial.printf("Connected to Wi-Fi. Hostname=%s, IP=%s, MAC=%s\n", hostname, ipStr.c_str(),
-                macStr.c_str());
+  Serial.printf("Connected to Wi-Fi. Hostname=%s, IP=%s, MAC=%s\n", hostname,
+                ipStr.c_str(), macStr.c_str());
+
+  // Start mDNS responder for easy access via coop2.local
+  if (MDNS.begin("coop2")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS responder started: http://coop2.local");
+  } else {
+    Serial.println("mDNS failed to start.");
+  }
+
   return true;
 }
 
 void syncClock() {
-  const long offsetSeconds = static_cast<long>(activeTimezoneOffsetMinutes) * 60L;
-  configTime(offsetSeconds, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+  const long offsetSeconds =
+      static_cast<long>(activeTimezoneOffsetMinutes) * 60L;
+  configTime(offsetSeconds, 0, "pool.ntp.org", "time.nist.gov",
+             "time.google.com");
   struct tm timeinfo;
   for (int attempt = 0; attempt < 10; ++attempt) {
     if (getLocalTime(&timeinfo, 5000)) {
